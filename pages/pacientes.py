@@ -22,7 +22,7 @@ div[data-testid="stVerticalBlock"] { gap: 0.1rem !important; }
 div[data-testid="stMarkdownContainer"] p { margin-bottom: 0px !important; }
 [data-testid="stTextInput"] input,
 [data-testid="stSelectbox"] > div {
-    max-width: 100% !important;  /* Ajustado al 100% para que use bien el ancho de la columna */
+    max-width: 100% !important;
     min-height: 36px !important;
     padding-top: 4px !important;
     padding-bottom: 4px !important;
@@ -35,7 +35,7 @@ div[data-testid="stMarkdownContainer"] p { margin-bottom: 0px !important; }
 # CALLBACKS DINÁMICOS DE FORMATEO
 # ==================================================
 def formatear_busqueda_callback():
-    busqueda_actual = st.session_state.get("busqueda_input", "")
+    busqueda_actual = st.session_state.get("busqueda_input_pacientes", "")
     if not busqueda_actual: return
     limpio = busqueda_actual.replace(".", "").replace("-", "").strip().upper()
     if 7 <= len(limpio) <= 9:
@@ -43,11 +43,7 @@ def formatear_busqueda_callback():
         dv = limpio[-1]
         if cuerpo.isdigit() and (dv.isdigit() or dv == "K"):
             cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
-            st.session_state.busqueda_input = f"{cuerpo_formateado}-{dv}"
-
-def formatear_rut_callback():
-    # Callback opcional cuando cambia la selección del selectbox
-    pass
+            st.session_state.busqueda_input_pacientes = f"{cuerpo_formateado}-{dv}"
 
 def formatear_rut_dinamico(k):
     rut_actual = st.session_state.get(k, "")
@@ -86,46 +82,69 @@ if opcion_paciente == "Buscar paciente existente":
     _session = SessionLocal()
     try:
         pacientes_db = _session.query(Paciente).order_by(Paciente.apellido_paterno, Paciente.nombres).all()
-        df_pacientes = pd.DataFrame([
-            {
-                "RUT": p.rut,
-                "Nombre completo": f"{p.apellido_paterno} {p.apellido_materno or ''} {p.nombres}".strip(),
-            }
-            for p in pacientes_db
-        ])
+        if pacientes_db:
+            df_pacientes_todos = pd.DataFrame([
+                {
+                    "RUT": p.rut,
+                    "Nombre completo": f"{p.apellido_paterno} {p.apellido_materno or ''} {p.nombres}".strip(),
+                }
+                for p in pacientes_db
+            ])
+        else:
+            df_pacientes_todos = pd.DataFrame(columns=["RUT", "Nombre completo"])  # DataFrame vacío con columnas
     finally:
         _session.close()
 
-    # Columnas integradas lado a lado para búsqueda y selección
     col_search, col_seleccion = st.columns([1, 1])
-    
+
     with col_search:
         busqueda = st.text_input(
             "🔎 Buscar paciente en la base de datos", 
             value="", placeholder="Ej: Nombre, Apellido o RUT",
-            key="busqueda_input",
+            key="busqueda_input_pacientes",
             on_change=formatear_busqueda_callback
         )
- 
-    # El filtrado se realiza inmediatamente después de la búsqueda
-    if busqueda and not df_pacientes.empty:
-        mask = df_pacientes["Nombre completo"].str.contains(busqueda, case=False, na=False) | \
-               df_pacientes["RUT"].str.contains(busqueda, case=False, na=False)
-        df_pacientes = df_pacientes[mask]
 
     with col_seleccion:
-        rut_seleccionado = st.selectbox(
-            "✅ Seleccionar un paciente existente", 
-            options=df_pacientes["RUT"].tolist() if not df_pacientes.empty else [],
-            index=None,  # <-- Hace que no haya ninguna opción seleccionada por defecto
-            placeholder="Seleccionar 👇",  # <-- Texto que se muestra por defecto
-            format_func=lambda r: f"{df_pacientes[df_pacientes['RUT'] == r]['Nombre completo'].iloc[0]} ({r})" if not df_pacientes.empty else "No hay pacientes registrados",
-            key="rut_input",
-            on_change=formatear_rut_callback
-        ) 
+        if df_pacientes_todos.empty:
+            st.info("No hay pacientes registrados en la base de datos.")
+            rut_seleccionado = None
+        else:
+            opciones_todos = df_pacientes_todos["RUT"].tolist()
+            rut_seleccionado = st.selectbox(
+                "✅ Seleccionar un paciente existente",
+                options=opciones_todos,
+                index=None,
+                placeholder="Seleccionar 👇",
+                format_func=lambda r: f"{df_pacientes_todos[df_pacientes_todos['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+                key="selectbox_todos_pacientes",
+            )
 
-    # Carga segura del paciente seleccionado si la lista no está vacía
-    if not df_pacientes.empty and rut_seleccionado:
+    # Selector adicional que aparece SOLO si hay búsqueda y hay datos
+    if busqueda and not df_pacientes_todos.empty:
+        mask = (
+            df_pacientes_todos["Nombre completo"].str.contains(busqueda, case=False, na=False) |
+            df_pacientes_todos["RUT"].str.contains(busqueda, case=False, na=False)
+        )
+        df_filtrado = df_pacientes_todos[mask]
+
+        if not df_filtrado.empty:
+            st.markdown("---")
+            rut_filtrado = st.selectbox(
+                "🔍 Seleccione el paciente de la búsqueda",
+                options=df_filtrado["RUT"].tolist(),
+                index=None,
+                placeholder="Resultados de búsqueda 👇",
+                format_func=lambda r: f"{df_filtrado[df_filtrado['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+                key="selectbox_busqueda_pacientes",
+            )
+            if rut_filtrado:
+                rut_seleccionado = rut_filtrado
+        else:
+            st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
+
+    # Carga segura del paciente seleccionado
+    if rut_seleccionado:
         _session = SessionLocal()
         try:
             paciente_existente = _session.query(Paciente).filter(Paciente.rut == rut_seleccionado).first()
@@ -133,8 +152,10 @@ if opcion_paciente == "Buscar paciente existente":
         finally:
             _session.close()
     else:
-        st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
-
+        if not busqueda and not df_pacientes_todos.empty:
+            st.info("🔍 Escribe en el campo de búsqueda para encontrar un paciente, o selecciona uno de la lista.")
+        elif df_pacientes_todos.empty:
+            st.info("No hay pacientes registrados. Use la opción 'Ingresar nuevo paciente'.")
 
 # ==================================================
 # VARIABLES PRE-CARGADAS DEL FORMULARIO

@@ -520,31 +520,34 @@ def renderizar_variable(variable, col_contenedor):
 
     return valor
 
-
 # ==================================================
-# SELECCIÓN, BÚSQUEDA Y EDICIÓN DE PACIENTE
+# SELECCIÓN Y BÚSQUEDA DE PACIENTE
 # ==================================================
 st.subheader("Selección de Paciente")
 
 _session = SessionLocal()
 try:
     pacientes_db = _session.query(Paciente).order_by(Paciente.apellido_paterno, Paciente.nombres).all()
-    df_pacientes = pd.DataFrame([
-        {
-            "RUT": p.rut,
-            "Nombre completo": f"{p.apellido_paterno} {p.apellido_materno or ''} {p.nombres}".strip(),
-        }
-        for p in pacientes_db
-    ])
+    if pacientes_db:
+        df_pacientes_todos = pd.DataFrame([
+            {
+                "RUT": p.rut,
+                "Nombre completo": f"{p.apellido_paterno} {p.apellido_materno or ''} {p.nombres}".strip(),
+            }
+            for p in pacientes_db
+        ])
+    else:
+        df_pacientes_todos = pd.DataFrame(columns=["RUT", "Nombre completo"])
 finally:
     _session.close()
 
-col_link, col_search, col_seleccion= st.columns([1, 1, 1])
+col_link, col_search, col_seleccion = st.columns([1, 1, 1])
+
 with col_link:
     st.markdown("<br>", unsafe_allow_html=True)
-    # Botón que actúa como interruptor (toggle)
     if st.button("➕ Registrar Nuevo Paciente", icon="👤", key="btn_mostrar_inline"):
         st.session_state["mostrar_crear_paciente"] = True
+
 with col_search:
     busqueda = st.text_input(
         "🔎 Buscar paciente en la base de datos", 
@@ -552,24 +555,56 @@ with col_search:
         key="busqueda_input",
         on_change=formatear_busqueda_callback
     )
-with col_seleccion:
-    rut_seleccionado = st.selectbox(
-        "✅ Seleccionar un paciente existente", 
-        options=df_pacientes["RUT"].tolist() if not df_pacientes.empty else [],
-        index=None,  # <-- Hace que no haya ninguna opción seleccionada por defecto
-        placeholder="Seleccionar 👇",  # <-- Texto que se muestra por defecto
-        format_func=lambda r: f"{df_pacientes[df_pacientes['RUT'] == r]['Nombre completo'].iloc[0]} ({r})" if not df_pacientes.empty else "No hay pacientes registrados",
-        key="rut_input",
-        on_change=formatear_rut_callback
-    )
 
-# --- CORRECCIÓN: Sacamos el bloque IF fuera de 'with col_link' para que use todo el ancho de la ventana ---
+with col_seleccion:
+    if df_pacientes_todos.empty:
+        st.info("No hay pacientes registrados.")
+        rut_seleccionado = None
+    else:
+        # --- SOLUCIÓN: Interceptar el nuevo paciente antes de instanciar el widget ---
+        if "paciente_recien_creado" in st.session_state:
+            st.session_state["selectbox_todos_estudios"] = st.session_state.pop("paciente_recien_creado")
+
+        rut_seleccionado = st.selectbox(
+            "✅ Seleccionar un paciente existente", 
+            options=df_pacientes_todos["RUT"].tolist(),
+            index=None,  
+            placeholder="Seleccionar 👇",  
+            format_func=lambda r: f"{df_pacientes_todos[df_pacientes_todos['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+            key="selectbox_todos_estudios" # Key única, sin callback conflictivo
+        )
+
+# Selector dinámico de búsqueda (Aparece abajo si se busca algo, igual que en pacientes.py)
+if busqueda and not df_pacientes_todos.empty:
+    mask = (
+        df_pacientes_todos["Nombre completo"].str.contains(busqueda, case=False, na=False) |
+        df_pacientes_todos["RUT"].str.contains(busqueda, case=False, na=False)
+    )
+    df_filtrado = df_pacientes_todos[mask]
+
+    if not df_filtrado.empty:
+        st.markdown("---")
+        rut_filtrado = st.selectbox(
+            "🔍 Seleccione el paciente de la búsqueda",
+            options=df_filtrado["RUT"].tolist(),
+            index=None,
+            placeholder="Resultados de búsqueda 👇",
+            format_func=lambda r: f"{df_filtrado[df_filtrado['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+            key="selectbox_busqueda_estudios"
+        )
+        if rut_filtrado:
+            rut_seleccionado = rut_filtrado  # Prioriza el paciente seleccionado en la búsqueda
+    else:
+        st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
+
+# ==================================================
+# FORMULARIO: REGISTRAR NUEVO PACIENTE (INLINE)
+# ==================================================
 if st.session_state.get("mostrar_crear_paciente", False):
     st.divider()
     st.markdown("#### 👤 Registrar Nuevo Paciente")
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Inicializamos las variables vacías (ya que es un paciente nuevo)
     v_rut = ""
     v_nom = ""
     v_ap = ""
@@ -578,38 +613,36 @@ if st.session_state.get("mostrar_crear_paciente", False):
     opts_prev = ["", "Fonasa", "Isapre", "Otra"]
     opts_sexo = ["", "Masculino", "Femenino"]
     
-    # Keys únicas para evitar colisiones en esta ventana
     key_rut = "rut_inline_nuevo"
     key_fono = "fono_inline_nuevo"
     key_celular = "celular_inline_nuevo"
 
-    # Ahora las 4 columnas se desplegarán correctamente a lo ancho de la pantalla
     col1, col2, col3, col4 = st.columns(4)
-    with col1: rut = st.text_input("RUT del paciente", value=v_rut, placeholder="Ej: 12.345.678-9", key=key_rut, on_change=formatear_rut_dinamico, args=(key_rut,))
-    with col2: nombres = st.text_input("Nombres", value=v_nom, key="nom_inline")
-    with col3: apellido_paterno = st.text_input("Apellido paterno", value=v_ap, key="ap_inline")
-    with col4: apellido_materno = st.text_input("Apellido materno", value=v_am, key="am_inline")
+    with col1: rut_nuevo = st.text_input("RUT del paciente", value=v_rut, placeholder="Ej: 12.345.678-9", key=key_rut, on_change=formatear_rut_dinamico, args=(key_rut,))
+    with col2: nombres_nuevo = st.text_input("Nombres", value=v_nom, key="nom_inline")
+    with col3: apellido_paterno_nuevo = st.text_input("Apellido paterno", value=v_ap, key="ap_inline")
+    with col4: apellido_materno_nuevo = st.text_input("Apellido materno", value=v_am, key="am_inline")
 
     col5, col6, col7, col8 = st.columns(4)
     with col5:
-        fecha_nacimiento = st.date_input("Fecha nacimiento", value=v_fn, min_value=date(1900, 1, 1), max_value=date.today(), format="DD/MM/YYYY", key="fn_inline")
+        fecha_nacimiento_nuevo = st.date_input("Fecha nacimiento", value=v_fn, min_value=date(1900, 1, 1), max_value=date.today(), format="DD/MM/YYYY", key="fn_inline")
     with col6:
         hoy = date.today()
-        edad_paciente = hoy.year - fecha_nacimiento.year - ((hoy.month, hoy.day) < (fecha_nacimiento.month, fecha_nacimiento.day))
-        st.text_input("Edad calculada", value=f"{edad_paciente} años", disabled=True, key="edad_inline")
+        edad_paciente = hoy.year - fecha_nacimiento_nuevo.year - ((hoy.month, hoy.day) < (fecha_nacimiento_nuevo.month, fecha_nacimiento_nuevo.day))
+        # SOLUCIÓN: Quitamos el parámetro key para que el valor se actualice visualmente
+        st.text_input("Edad calculada", value=f"{edad_paciente} años", disabled=True)
     with col7:
-        prevision = st.selectbox("Previsión", opts_prev, index=0, key="prev_inline")
+        prevision_nuevo = st.selectbox("Previsión", opts_prev, index=0, key="prev_inline")
     with col8:
-        sexo = st.selectbox("Sexo", opts_sexo, index=0, key="sexo_inline")        
+        sexo_nuevo = st.selectbox("Sexo", opts_sexo, index=0, key="sexo_inline")        
 
     col9, col10, col11 = st.columns(3)
-    with col9: fono_fijo = st.text_input("Fono fijo", value="", placeholder="Ej: +56 22 123 4567", key=key_fono, on_change=formatear_telefono_dinamico, args=(key_fono,))
-    with col10: celular = st.text_input("Celular", value="", placeholder="Ej: +56 987 654 321", key=key_celular, on_change=formatear_telefono_dinamico, args=(key_celular,))
-    with col11: email = st.text_input("Email", value="", placeholder="ejemplo@correo.com", key="email_inline")
+    with col9: fono_fijo_nuevo = st.text_input("Fono fijo", value="", placeholder="Ej: +56 22 123 4567", key=key_fono, on_change=formatear_telefono_dinamico, args=(key_fono,))
+    with col10: celular_nuevo = st.text_input("Celular", value="", placeholder="Ej: +56 987 654 321", key=key_celular, on_change=formatear_telefono_dinamico, args=(key_celular,))
+    with col11: email_nuevo = st.text_input("Email", value="", placeholder="ejemplo@correo.com", key="email_inline")
 
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Botones de acción del formulario inline
     c_btn1, c_btn2 = st.columns([1, 4])
     with c_btn1:
         if st.button("❌ Cancelar", use_container_width=True):
@@ -618,73 +651,61 @@ if st.session_state.get("mostrar_crear_paciente", False):
             
     with c_btn2:
         if st.button("💾 Guardar y seleccionar paciente", type="primary", use_container_width=True):
-            if not rut or not nombres or not apellido_paterno:
+            if not rut_nuevo or not nombres_nuevo or not apellido_paterno_nuevo:
                 st.error("❌ Debe completar al menos: RUT, Nombres y Apellido paterno.")
             else:
                 session = SessionLocal()
                 try:
-                    rut_limpio = rut.strip()
+                    rut_limpio = rut_nuevo.strip()
                     existe = session.query(Paciente).filter(Paciente.rut == rut_limpio).first()
                     if existe:
                         st.error(f"⚠️ Ya existe un paciente registrado con el RUT {rut_limpio}")
                     else:
                         nuevo_p = Paciente(
                             rut=rut_limpio,
-                            nombres=nombres,
-                            apellido_paterno=apellido_paterno,
-                            apellido_materno=apellido_materno,
-                            fecha_nacimiento=fecha_nacimiento,
-                            sexo=sexo if sexo else None,
-                            telefono=celular if celular else None,
-                            email=email if email else None
+                            nombres=nombres_nuevo,
+                            apellido_paterno=apellido_paterno_nuevo,
+                            apellido_materno=apellido_materno_nuevo,
+                            fecha_nacimiento=fecha_nacimiento_nuevo,
+                            sexo=sexo_nuevo if sexo_nuevo else None,
+                            telefono=celular_nuevo if celular_nuevo else None,
+                            email=email_nuevo if email_nuevo else None
                         )
-                        
-                        if hasattr(nuevo_p, 'prevision'): nuevo_p.prevision = prevision
-                        if hasattr(nuevo_p, 'fono_fijo'): nuevo_p.fono_fijo = fono_fijo
+                        if hasattr(nuevo_p, 'prevision'): nuevo_p.prevision = prevision_nuevo
+                        if hasattr(nuevo_p, 'fono_fijo'): nuevo_p.fono_fijo = fono_fijo_nuevo
                         
                         session.add(nuevo_p)
                         session.commit()
                         
-                        # Almacenamos el nuevo RUT en el selectbox principal del estudio para auto-seleccionarlo
-                        st.session_state["rut_input"] = rut_limpio
-                        # Apagamos el formulario inline para que vuelva a ocultarse
-                        st.session_state["mostrar_crear_paciente"] = False
+                        # NUEVA LÍNEA CORREGIDA (Usamos una variable temporal):
+                        st.session_state["paciente_recien_creado"] = rut_limpio
                         
+                        st.session_state["mostrar_crear_paciente"] = False
                         st.success(f"✅ Paciente registrado con éxito.")
-                        st.rerun()  # Refresca la interfaz aplicando los cambios de estado
+                        st.rerun()
                 except Exception as e:
                     session.rollback()
                     st.error(f"❌ Error al guardar en la base de datos: {e}")
                 finally:
                     session.close()
 
-paciente_existente = None
+# ==================================================
+# PROCESAMIENTO DEL PACIENTE ACTIVO PARA EL ESTUDIO
+# ==================================================
 rut = ""
-
-# Variables de respaldo iniciales para que el resto del script no falle si no hay búsqueda
+paciente_existente = None
 nombres = apellido_paterno = apellido_materno = sexo = telefono = email_paciente = ""
 fecha_nacimiento = date(2000, 1, 1)
 
-if busqueda and not df_pacientes.empty:
-    mask = df_pacientes["Nombre completo"].str.contains(busqueda, case=False, na=False) | \
-           df_pacientes["RUT"].str.contains(busqueda, case=False, na=False)
-    df_filtrado = df_pacientes[mask]
-    
-    if not df_filtrado.empty:
-        rut_seleccionado = st.selectbox(
-            "Seleccione el paciente para este estudio",
-            options=df_filtrado["RUT"].tolist(),
-            format_func=lambda r: f"{df_filtrado[df_filtrado['RUT'] == r]['Nombre completo'].iloc[0]} ({r})"
-        )
-        rut = rut_seleccionado
+if rut_seleccionado:
+    rut = rut_seleccionado
+    _session = SessionLocal()
+    try:
+        paciente_existente = _session.query(Paciente).filter(Paciente.rut == rut_seleccionado).first()
         
-        _session = SessionLocal()
-        try:
-            paciente_existente = _session.query(Paciente).filter(Paciente.rut == rut).first()
-            
+        if paciente_existente:
             nombre_completo = f"{paciente_existente.nombres} {paciente_existente.apellido_paterno} {paciente_existente.apellido_materno or ''}".strip()
             
-            # --- CÁLCULO DE EDAD PARA EL RESUMEN ---
             edad_str = "—"
             if paciente_existente.fecha_nacimiento:
                 hoy = date.today()
@@ -695,7 +716,6 @@ if busqueda and not df_pacientes.empty:
             st.success(f"✅ **Paciente seleccionado:** {nombre_completo} | **RUT:** {paciente_existente.rut} | **Edad:** {edad_str} | **Sexo:** {paciente_existente.sexo or '—'}")
             
             with st.expander("✏️ Ver / Modificar datos del paciente", expanded=False):
-                
                 v_nom = paciente_existente.nombres
                 v_ap = paciente_existente.apellido_paterno
                 v_am = paciente_existente.apellido_materno or ""
@@ -715,7 +735,7 @@ if busqueda and not df_pacientes.empty:
 
                 with st.form(key=f"form_edit_paciente_{paciente_existente.rut}"):
                     c1, c2, c3, c4 = st.columns(4)
-                    mod_rut = c1.text_input("RUT", value=paciente_existente.rut, disabled=True, help="El RUT no se puede modificar desde aquí.")
+                    mod_rut = c1.text_input("RUT", value=paciente_existente.rut, disabled=True, help="El RUT no se puede modificar.")
                     mod_nom = c2.text_input("Nombres", value=v_nom)
                     mod_ap = c3.text_input("Apellido paterno", value=v_ap)
                     mod_am = c4.text_input("Apellido materno", value=v_am)
@@ -725,60 +745,53 @@ if busqueda and not df_pacientes.empty:
                     
                     hoy = date.today()
                     edad_calc = hoy.year - mod_fn.year - ((hoy.month, hoy.day) < (mod_fn.month, mod_fn.day))
-                    c6.text_input("Edad calculada", value=f"{edad_calc} años", disabled=True)
+                    c6.text_input("Edad Real", value=f"{edad_calc} años", disabled=True)
                     
                     mod_prev = c7.selectbox("Previsión", opts_prev, index=idx_prev)
                     mod_sexo = c8.selectbox("Sexo", opts_sexo, index=idx_sexo)
                     
                     c9, c10, c11 = st.columns(3)
-                    mod_fono = c9.text_input("Fono fijo", value=v_fono, placeholder="+56 22 123 4567")
-                    mod_cel = c10.text_input("Celular", value=v_cel, placeholder="+56 987 654 321")
+                    mod_fono = c9.text_input("Fono fijo", value=v_fono)
+                    mod_cel = c10.text_input("Celular", value=v_cel)
                     mod_email = c11.text_input("Email", value=v_email)
                     
-                    submit_modificacion = st.form_submit_button("💾 Actualizar datos del paciente", type="primary")
-                    
-                    if submit_modificacion:
+                    if st.form_submit_button("💾 Actualizar Ficha del Paciente", type="primary"):
+                        session_upd = SessionLocal()
                         try:
-                            session_upd = SessionLocal()
-                            pac_upd = session_upd.query(Paciente).filter(Paciente.rut == paciente_existente.rut).first()
-                            
-                            pac_upd.nombres = mod_nom
-                            pac_upd.apellido_paterno = mod_ap
-                            pac_upd.apellido_materno = mod_am
-                            pac_upd.fecha_nacimiento = mod_fn
-                            pac_upd.sexo = mod_sexo if mod_sexo else None
-                            pac_upd.telefono = mod_cel if mod_cel else None
-                            pac_upd.email = mod_email if mod_email else None
-                            if hasattr(pac_upd, 'prevision'): pac_upd.prevision = mod_prev
-                            if hasattr(pac_upd, 'fono_fijo'): pac_upd.fono_fijo = mod_fono
-                            
-                            session_upd.commit()
-                            session_upd.close()
-                            st.success("✅ ¡Datos del paciente actualizados exitosamente! Continúe con el estudio.")
-                            
-                            paciente_existente.nombres = mod_nom
-                            paciente_existente.apellido_paterno = mod_ap
-                            paciente_existente.apellido_materno = mod_am
-                            paciente_existente.fecha_nacimiento = mod_fn
-                            paciente_existente.sexo = mod_sexo
+                            paciente_edit = session_upd.query(Paciente).filter(Paciente.rut == paciente_existente.rut).first()
+                            if paciente_edit:
+                                paciente_edit.nombres = mod_nom
+                                paciente_edit.apellido_paterno = mod_ap
+                                paciente_edit.apellido_materno = mod_am
+                                paciente_edit.fecha_nacimiento = mod_fn
+                                paciente_edit.sexo = mod_sexo if mod_sexo else None
+                                paciente_edit.telefono = mod_cel if mod_cel else None
+                                paciente_edit.email = mod_email if mod_email else None
+                                if hasattr(paciente_edit, 'prevision'): paciente_edit.prevision = mod_prev
+                                if hasattr(paciente_edit, 'fono_fijo'): paciente_edit.fono_fijo = mod_fono
+                                
+                                session_upd.commit()
+                                st.success("✅ Datos del paciente actualizados con éxito.")
+                                st.rerun()
                         except Exception as e:
-                            st.error(f"❌ Error al actualizar datos: {e}")
+                            st.error(f"Error actualizando datos: {e}")
+                        finally:
+                            session_upd.close()
 
             st.session_state["paciente_existente_sexo"] = paciente_existente.sexo
-            
             nombres = paciente_existente.nombres
             apellido_paterno = paciente_existente.apellido_paterno
             apellido_materno = paciente_existente.apellido_materno
             fecha_nacimiento = paciente_existente.fecha_nacimiento
             sexo = paciente_existente.sexo
             
-        finally:
-            _session.close()
-    else:
-        st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
-elif not busqueda: 
+    except Exception as e:
+        st.error(f"Error procesando los datos de la ficha clínica: {e}")
+    finally:
+        _session.close()
+else:
     st.session_state["paciente_existente_sexo"] = None
-
+    st.info("💡 Por favor, busque y seleccione un paciente existente, o registre uno nuevo para comenzar a capturar las mediciones del estudio.")
 
 # ==================================================
 # MEDICIONES Y DATOS GENERALES (SISTEMA DE PESTAÑAS)
