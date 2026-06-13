@@ -423,20 +423,26 @@ try:
         df_global["fecha_str"] = df_global["fecha_dt"].dt.strftime("%d/%m/%Y")
         df_global["paciente"] = df_global["apellido_paterno"] + " " + df_global["nombres"]
 
-        fig_global = px.scatter(
-            df_global,
-            x="fecha_dt",
-            y="valor",
-            hover_data=["paciente", "rut"],
-            title=f"Evolución de {var_seleccionada} en toda la cohorte",
-            labels={"fecha_dt": "Fecha", "valor": f"{var_seleccionada}"},
-            trendline="lowess"
-        )
-        fig_global.update_xaxes(tickformat="%d/%m/%Y", title_text="Fecha")
-        st.plotly_chart(fig_global, use_container_width=True)        
+        # Crear las dos columnas (65% para el gráfico, 35% para la tabla estadística)
+        col_grafico, col_tabla = st.columns([2, 1])
 
-        st.write("**Estadísticas descriptivas globales**")
-        st.dataframe(df_global["valor"].describe(), use_container_width=True)
+        with col_grafico:
+            fig_global = px.scatter(
+                df_global,
+                x="fecha_dt",
+                y="valor",
+                hover_data=["paciente", "rut"],
+                title=f"Evolución de {var_seleccionada} en toda la cohorte",
+                labels={"fecha_dt": "Fecha", "valor": f"{var_seleccionada}"},
+                trendline="lowess"
+            )
+            fig_global.update_xaxes(tickformat="%d/%m/%Y", title_text="Fecha")
+            st.plotly_chart(fig_global, use_container_width=True)        
+
+        with col_tabla:
+            st.write(f"**Estadísticas descriptivas ({var_seleccionada})**")
+            # Mostramos la descripción estadística formateada de manera elegante
+            st.dataframe(df_global["valor"].describe(), use_container_width=True)
 
 except Exception as e:
     st.error(f"Error inesperado en el panel: {e}")
