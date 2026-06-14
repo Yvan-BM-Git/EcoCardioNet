@@ -1,5 +1,21 @@
 # Archivo: pages/estudios.py
 import streamlit as st
+
+# ==================================================
+# CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
+# ==================================================
+st.set_page_config(page_title="Nuevo Estudio", page_icon="🩺", layout="wide")
+
+from menu import generar_menu
+
+# 1. Dibujar el menú dinámico
+generar_menu()
+
+# 2. Candado de seguridad
+if not st.session_state.get("autenticado", False):
+    st.warning("🛑 Debes iniciar sesión para ver esta página.")
+    st.stop()
+     
 import pandas as pd
 from datetime import date, datetime
 import io

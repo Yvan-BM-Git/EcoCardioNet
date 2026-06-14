@@ -1,5 +1,21 @@
 # Archivo: pages/historial.py
 import streamlit as st
+
+# ==================================================
+# CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
+# ==================================================
+st.set_page_config(page_title="Historial Clínico", page_icon="📁", layout="wide")
+
+from menu import generar_menu
+
+# 1. Dibujar el menú dinámico
+generar_menu()
+
+# 2. Candado de seguridad
+if not st.session_state.get("autenticado", False):
+    st.warning("🛑 Debes iniciar sesión para ver esta página.")
+    st.stop()
+
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
@@ -13,7 +29,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Medicion, Variable
 
-st.set_page_config(layout="wide")
+# st.set_page_config(layout="wide")
 st.title("📊 Panel de gestión clínica - Ecocardiografía")
 
 # ==================================================
@@ -49,7 +65,7 @@ def generar_pdf_desde_historial(estudio, paciente, mediciones_estudio):
                                         leading=11, textColor=colors.white)
     story = []
 
-    story.append(Paragraph("<b>ULTRASOUND LABORATORY - CARDIAC REPORT</b>", style_h1))
+    story.append(Paragraph("<b>EcoCardioNet CARDIAC REPORT</b>", style_h1))
     story.append(Spacer(1, 12))
 
     nombre_p = f"{paciente.apellido_paterno} {paciente.apellido_materno or ''} {paciente.nombres}".strip()

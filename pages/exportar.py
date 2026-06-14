@@ -1,5 +1,21 @@
 # Archivo: pages/exportar.py
 import streamlit as st
+
+# ==================================================
+# CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
+# ==================================================
+st.set_page_config(page_title="Exportar Datos", page_icon="📊", layout="wide")
+
+from menu import generar_menu
+
+# 1. Dibujar el menú dinámico
+generar_menu()
+
+# 2. Candado de seguridad
+if not st.session_state.get("autenticado", False):
+    st.warning("🛑 Debes iniciar sesión para ver esta página.")
+    st.stop()
+
 import pandas as pd
 import numpy as np
 import io
@@ -8,7 +24,7 @@ from datetime import date, datetime
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Medicion, Variable
 
-st.set_page_config(page_title="Exportar Datos", layout="wide")
+# st.set_page_config(page_title="Exportar Datos", layout="wide")
 st.title("📥 Exportación de Base de Datos para Investigación")
 
 st.markdown("""

@@ -1,35 +1,29 @@
 # Archivo: pages/pacientes.py
 import streamlit as st
+
+# ==================================================
+# CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
+# ==================================================
+st.set_page_config(page_title="Pacientes - EcoCardioNet", page_icon="👤", layout="wide")
+
+from menu import generar_menu
+
+# 1. Dibujar el menú dinámico
+generar_menu()
+
+# 2. Candado de seguridad
+if not st.session_state.get("autenticado", False):
+    st.warning("🛑 Debes iniciar sesión para ver esta página.")
+    st.stop()
+    
 import pandas as pd
 from datetime import date
-
 from database.database import SessionLocal
 from database.models import Paciente
 
+
 # Configuración del título
 st.title("👤 Gestión de Pacientes")
-
-# ==================================================
-# ESTILOS CSS COMPACTOS
-# ==================================================
-st.markdown("""
-<style>
-section[data-testid="stMain"] > div:first-child {
-    max-width: 1100px;
-    margin: 0 auto;
-}
-div[data-testid="stVerticalBlock"] { gap: 0.1rem !important; }
-div[data-testid="stMarkdownContainer"] p { margin-bottom: 0px !important; }
-[data-testid="stTextInput"] input,
-[data-testid="stSelectbox"] > div {
-    max-width: 100% !important;
-    min-height: 36px !important;
-    padding-top: 4px !important;
-    padding-bottom: 4px !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
 
 # ==================================================
 # CALLBACKS DINÁMICOS DE FORMATEO Y HELPERS
