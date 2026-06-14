@@ -8,20 +8,25 @@ Actualmente, el sistema está completamente preparado para producción, utilizan
 
 ## 🚀 Accesos Rápidos
 
-### 📝 Registrar un Examen
-Ingresa los datos de un nuevo paciente de forma dinámica o búscalo directamente en la base de datos para documentar su ecocardiograma de manera estructurada.
+### 👤 Gestionar Pacientes
+Agrega nuevos pacientes al sistema o actualiza sus antecedentes demográficos para comenzar a vincular sus respectivos estudios ecocardiográficos.
 
-**Acceso:** *Ir a Nuevo Estudio*
+**Acceso en la App:** *Ir a Pacientes* (`pages/pacientes.py`)
 
-### 📊 Ver Historial Clínico
-Busca pacientes existentes a través de filtros inteligentes (RUT, Nombre o Apellido), analiza la evolución de sus métricas a lo largo del tiempo y descarga PDFs históricos firmados.
+### 🩺 Registrar un Examen
+Ingresa los datos clínicos detallados, antecedentes de interés y documenta las mediciones del ecocardiograma del paciente de manera estructurada.
 
-**Acceso:** *Ir a Historial*
+**Acceso en la App:** *Ir a Nuevo Estudio* (`pages/estudios.py`)
 
-### ⚙️ Configuración
-Panel de administración avanzada para gestionar los rangos de las variables ecocardiográficas, credenciales de médicos de la institución y el estado de la base de datos.
+### 📁 Ver Historial Clínico
+Busca pacientes existentes a través de filtros inteligentes, analiza la evolución longitudinal de sus métricas a lo largo del tiempo y revisa exámenes anteriores.
 
-**Acceso:** *Ir a Configuración*
+**Acceso en la App:** *Ir a Historial* (`pages/historial.py`)
+
+### 📤 Exportar Reportes y Datos
+Módulo especializado para la generación formal de informes clínicos en formato PDF listos para distribución y la exportación de registros consolidados.
+
+**Acceso en la App:** *Ir a Exportar* (`pages/exportar.py`)
 
 ---
 
