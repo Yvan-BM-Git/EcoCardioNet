@@ -32,7 +32,7 @@ div[data-testid="stMarkdownContainer"] p { margin-bottom: 0px !important; }
 
 
 # ==================================================
-# CALLBACKS DINÁMICOS DE FORMATEO
+# CALLBACKS DINÁMICOS DE FORMATEO Y HELPERS
 # ==================================================
 def formatear_busqueda_callback():
     busqueda_actual = st.session_state.get("busqueda_input_pacientes", "")
@@ -47,27 +47,57 @@ def formatear_busqueda_callback():
 
 def formatear_rut_dinamico(k):
     rut_actual = st.session_state.get(k, "")
-    if not rut_actual: return
-    rut_limpio = "".join(c for c in rut_actual if c.isalnum()).upper()
+    if not rut_actual:
+        return
+
+    # Mantener solo números y K
+    rut_limpio = "".join(c for c in rut_actual.upper() if c.isdigit() or c == "K")
+
+    # Máximo 9 caracteres: 8 del cuerpo + DV
+    rut_limpio = rut_limpio[:9]
+
     if len(rut_limpio) < 2:
         st.session_state[k] = rut_limpio
         return
+
     cuerpo = rut_limpio[:-1]
     dv = rut_limpio[-1]
+
     if cuerpo.isdigit():
-        st.session_state[k] = f"{int(cuerpo):,}".replace(",", ".") + f"-{dv}"
-    else:
-        st.session_state[k] = f"{cuerpo}-{dv}"
+        cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
+        st.session_state[k] = f"{cuerpo_formateado}-{dv}"
 
 def formatear_telefono_dinamico(k):
     telf_actual = st.session_state.get(k, "")
-    if not telf_actual: return
-    numeros = "".join(c for c in telf_actual if c.isdigit())
-    if len(numeros) == 11 and numeros.startswith("56"): num_base = numeros[2:]
-    elif len(numeros) == 9: num_base = numeros
-    else: return
-    st.session_state[k] = f"+56 {num_base[:3]} {num_base[3:6]} {num_base[6:]}"
 
+    if not telf_actual:
+        return
+
+    # Mantener solo números
+    numeros = "".join(c for c in str(telf_actual) if c.isdigit())
+
+    # Restringir estrictamente a un máximo de 9 dígitos
+    numeros = numeros[:9]
+
+    # Formateo progresivo en bloques de 3 (sin prefijo)
+    if len(numeros) <= 3:
+        st.session_state[k] = numeros
+    elif len(numeros) <= 6:
+        st.session_state[k] = f"{numeros[:3]} {numeros[3:]}"
+    else:
+        st.session_state[k] = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
+
+def separar_prefijo_numero(tel_str):
+    """Separa el prefijo del número base para rellenar los inputs al editar"""
+    if not tel_str: 
+        return "+56", ""
+    tel_str = tel_str.strip()
+    if tel_str.startswith("+") and " " in tel_str:
+        partes = tel_str.split(" ", 1)
+        return partes[0], partes[1]
+    elif tel_str.startswith("+56"): # Porc si hay registros antiguos sin espacio
+        return "+56", tel_str[3:].strip()
+    return "+56", tel_str
 
 # ==================================================
 # SELECCIÓN Y BÚSQUEDA DE PACIENTE
@@ -174,14 +204,38 @@ opts_sexo = ["", "Masculino", "Femenino"]
 v_sexo = paciente_existente.sexo if paciente_existente and paciente_existente.sexo else ""
 idx_sexo = opts_sexo.index(v_sexo) if v_sexo in opts_sexo else 0
 
-v_fono = getattr(paciente_existente, 'fono_fijo', "") if paciente_existente and getattr(paciente_existente, 'fono_fijo', None) else ""
-v_cel = paciente_existente.telefono if paciente_existente and paciente_existente.telefono else ""
+# Separación de prefijos para los teléfonos
+v_fono_completo = getattr(paciente_existente, 'fono_fijo', "") if paciente_existente else ""
+v_cel_completo = paciente_existente.telefono if paciente_existente and paciente_existente.telefono else ""
+
+pref_fono_ext, base_fono_ext = separar_prefijo_numero(v_fono_completo)
+pref_cel_ext, base_cel_ext = separar_prefijo_numero(v_cel_completo)
+
 v_email = paciente_existente.email if paciente_existente and paciente_existente.email else ""
 
 prefijo_key = paciente_existente.rut if paciente_existente else "nuevo"
 key_rut = f"rut_input_{prefijo_key}"
-key_fono = f"fono_input_{prefijo_key}"      
-key_celular = f"celular_input_{prefijo_key}"
+key_fono_base = f"fono_base_input_{prefijo_key}"      
+key_celular_base = f"cel_base_input_{prefijo_key}"
+
+# Diccionario de prefijos
+dic_prefijos = {
+    "+56": "🇨🇱 +56",
+    "+54": "🇦🇷 +54",
+    "+51": "🇵🇪 +51",
+    "+57": "🇨🇴 +57",
+    "+52": "🇲🇽 +52",
+    "+58": "🇻🇪 +58",
+    "+593": "🇪🇨 +593",
+    "+591": "🇧🇴 +591",
+    "+595": "🇵🇾 +595",
+    "+598": "🇺🇾 +598",
+    "+55": "🇧🇷 +55",
+    "+1":  "🇺🇸/🇨🇦 +1",
+    "+34": "🇪🇸 +34",
+    "OTRO": "🌍 Otro..."
+}
+lista_prefijos = list(dic_prefijos.keys())
 
 
 # ==================================================
@@ -189,11 +243,20 @@ key_celular = f"celular_input_{prefijo_key}"
 # ==================================================
 if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
     st.divider()
-    st.markdown("#### 👤 Registrar Nuevo Paciente")
+    st.markdown("#### 👤 Registrar Nuevo Paciente" if not paciente_existente else "#### 👤 Editar Paciente")
     st.markdown("<br>", unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
-    with col1: rut = st.text_input("RUT del paciente", value=v_rut, placeholder="Ej: 12.345.678-9", key=key_rut, on_change=formatear_rut_dinamico, args=(key_rut,))
+    with col1: 
+        rut = st.text_input(
+            "RUT del paciente",
+            value=v_rut,
+            placeholder="Ej: 12.345.678-9",
+            max_chars=12,
+            key=key_rut,
+            on_change=formatear_rut_dinamico,
+            args=(key_rut,)
+        )        
     with col2: nombres = st.text_input("Nombres", value=v_nom)
     with col3: apellido_paterno = st.text_input("Apellido paterno", value=v_ap)
     with col4: apellido_materno = st.text_input("Apellido materno", value=v_am)
@@ -211,9 +274,57 @@ if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
         sexo = st.selectbox("Sexo", opts_sexo, index=idx_sexo)        
 
     col9, col10, col11 = st.columns(3)
-    with col9: fono_fijo = st.text_input("Fono fijo", value=v_fono, placeholder="Ej: +56 22 123 4567", key=key_fono, on_change=formatear_telefono_dinamico, args=(key_fono,))
-    with col10: celular = st.text_input("Celular", value=v_cel, placeholder="Ej: +56 987 654 321", key=key_celular, on_change=formatear_telefono_dinamico, args=(key_celular,))
-    with col11: email = st.text_input("Email", value=v_email, placeholder="ejemplo@correo.com")
+    
+    with col9: 
+        c_pref1, c_num1 = st.columns([1, 2])
+        with c_pref1:
+            idx_p_fono = lista_prefijos.index(pref_fono_ext) if pref_fono_ext in lista_prefijos else lista_prefijos.index("OTRO")
+            sel_pref_fono = st.selectbox("Cód.", options=lista_prefijos, index=idx_p_fono, format_func=lambda x: dic_prefijos[x], key=f"p_fono_{prefijo_key}")
+            
+            if sel_pref_fono == "OTRO":
+                prefijo_fono = st.text_input("Escriba Cód.", value=pref_fono_ext if pref_fono_ext not in lista_prefijos else "+", key=f"m_fono_{prefijo_key}")
+            else:
+                prefijo_fono = sel_pref_fono
+
+        with c_num1:
+            fono_base = st.text_input(
+                "Fono fijo",
+                value=base_fono_ext,
+                placeholder="22 123 4567",
+                max_chars=11,
+                key=key_fono_base,
+                on_change=formatear_telefono_dinamico,
+                args=(key_fono_base,)
+            )
+        # Reconstruimos el teléfono fijo
+        fono_fijo_final = f"{prefijo_fono} {fono_base.strip()}" if fono_base.strip() else ""
+
+    with col10: 
+        c_pref2, c_num2 = st.columns([1, 2])
+        with c_pref2:
+            idx_p_cel = lista_prefijos.index(pref_cel_ext) if pref_cel_ext in lista_prefijos else lista_prefijos.index("OTRO")
+            sel_pref_cel = st.selectbox("Cód.", options=lista_prefijos, index=idx_p_cel, format_func=lambda x: dic_prefijos[x], key=f"p_cel_{prefijo_key}")
+            
+            if sel_pref_cel == "OTRO":
+                prefijo_cel = st.text_input("Escriba Cód.", value=pref_cel_ext if pref_cel_ext not in lista_prefijos else "+", key=f"m_cel_{prefijo_key}")
+            else:
+                prefijo_cel = sel_pref_cel
+
+        with c_num2:
+            celular_base = st.text_input(
+                "Celular",
+                value=base_cel_ext,
+                placeholder="987 654 321",
+                max_chars=11,
+                key=key_celular_base,
+                on_change=formatear_telefono_dinamico,
+                args=(key_celular_base,)
+            )
+        # Reconstruimos el celular
+        celular_final = f"{prefijo_cel} {celular_base.strip()}" if celular_base.strip() else ""
+            
+    with col11: 
+        email = st.text_input("Email", value=v_email, placeholder="ejemplo@correo.com")
 
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -233,11 +344,11 @@ if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
                     p.apellido_materno = apellido_materno
                     p.fecha_nacimiento = fecha_nacimiento
                     p.sexo = sexo if sexo else None
-                    p.telefono = celular if celular else None
+                    p.telefono = celular_final if celular_final else None
                     p.email = email if email else None
                     
                     if hasattr(p, 'prevision'): p.prevision = prevision
-                    if hasattr(p, 'fono_fijo'): p.fono_fijo = fono_fijo
+                    if hasattr(p, 'fono_fijo'): p.fono_fijo = fono_fijo_final
                     
                     session.commit()
                     st.success(f"✅ Paciente **{nombres} {apellido_paterno} {apellido_materno or ''}** actualizado correctamente.")
@@ -254,12 +365,12 @@ if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
                             apellido_materno=apellido_materno,
                             fecha_nacimiento=fecha_nacimiento,
                             sexo=sexo if sexo else None,
-                            telefono=celular if celular else None,
+                            telefono=celular_final if celular_final else None,
                             email=email if email else None
                         )
                         
                         if hasattr(nuevo_p, 'prevision'): nuevo_p.prevision = prevision
-                        if hasattr(nuevo_p, 'fono_fijo'): nuevo_p.fono_fijo = fono_fijo
+                        if hasattr(nuevo_p, 'fono_fijo'): nuevo_p.fono_fijo = fono_fijo_final
                         
                         session.add(nuevo_p)
                         session.commit()

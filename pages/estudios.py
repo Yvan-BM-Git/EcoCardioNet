@@ -14,31 +14,60 @@ from reportlab.lib.units import inch
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Variable, Medicion
 
+# Inicializar la lista de médicos en la memoria de la sesión
+if "lista_medicos_bd" not in st.session_state:
+    st.session_state["lista_medicos_bd"] = [
+        "Seleccione", 
+        "Dr. Eric Fuentes Latorre", 
+        "Dr. Felipe Norambuena R.", 
+        "Dr. Jorge Ardiles González", 
+        "Dr. Viet Nguyen"
+    ]
+
 # ==================================================
 # FUNCIONES DE FORMATEO (Agregar en pages/estudios.py)
 # ==================================================
 def formatear_rut_dinamico(k):
     rut_actual = st.session_state.get(k, "")
-    if not rut_actual: return
-    rut_limpio = "".join(c for c in rut_actual if c.isalnum()).upper()
+    if not rut_actual:
+        return
+
+    # Mantener solo números y K
+    rut_limpio = "".join(c for c in rut_actual.upper() if c.isdigit() or c == "K")
+
+    # Máximo 9 caracteres: 8 del cuerpo + DV
+    rut_limpio = rut_limpio[:9]
+
     if len(rut_limpio) < 2:
         st.session_state[k] = rut_limpio
         return
+
     cuerpo = rut_limpio[:-1]
     dv = rut_limpio[-1]
+
     if cuerpo.isdigit():
-        st.session_state[k] = f"{int(cuerpo):,}".replace(",", ".") + f"-{dv}"
-    else:
-        st.session_state[k] = f"{cuerpo}-{dv}"
+        cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
+        st.session_state[k] = f"{cuerpo_formateado}-{dv}"
 
 def formatear_telefono_dinamico(k):
     telf_actual = st.session_state.get(k, "")
-    if not telf_actual: return
-    numeros = "".join(c for c in telf_actual if c.isdigit())
-    if len(numeros) == 11 and numeros.startswith("56"): num_base = numeros[2:]
-    elif len(numeros) == 9: num_base = numeros
-    else: return
-    st.session_state[k] = f"+56 {num_base[:3]} {num_base[3:6]} {num_base[6:]}"
+
+    if not telf_actual:
+        return
+
+    # Mantener solo números
+    numeros = "".join(c for c in str(telf_actual) if c.isdigit())
+
+    # Restringir estrictamente a un máximo de 9 dígitos
+    numeros = numeros[:9]
+
+    # Formateo progresivo en bloques de 3
+    if len(numeros) <= 3:
+        st.session_state[k] = numeros
+    elif len(numeros) <= 6:
+        st.session_state[k] = f"{numeros[:3]} {numeros[3:]}"
+    else:
+        st.session_state[k] = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
 
 st.title("📝 Nuevo Estudio Ecocardiográfico")
 
@@ -459,13 +488,24 @@ def formatear_rut_callback():
         st.session_state.rut_input = f"{cuerpo}-{dv}"
 
 def formatear_telefono_callback():
-    telf_actual = st.session_state.telefono_input
-    if not telf_actual: return
-    numeros = "".join(c for c in telf_actual if c.isdigit())
-    if len(numeros) == 11 and numeros.startswith("56"): num_base = numeros[2:]
-    elif len(numeros) == 9: num_base = numeros
-    else: return
-    st.session_state.telefono_input = f"+56 {num_base[:3]} {num_base[3:6]} {num_base[6:]}"
+    telf_actual = st.session_state.get("telefono_input", "")
+    
+    if not telf_actual: 
+        return
+        
+    # Mantener solo números
+    numeros = "".join(c for c in str(telf_actual) if c.isdigit())
+    
+    # Restringir estrictamente a un máximo de 9 dígitos
+    numeros = numeros[:9]
+    
+    # Formateo progresivo en bloques de 3
+    if len(numeros) <= 3:
+        st.session_state.telefono_input = numeros
+    elif len(numeros) <= 6:
+        st.session_state.telefono_input = f"{numeros[:3]} {numeros[3:]}"
+    else:
+        st.session_state.telefono_input = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
 
 def calcular_asc():
     try:
@@ -599,17 +639,24 @@ if busqueda and not df_pacientes_todos.empty:
 
 # ==================================================
 # FORMULARIO: REGISTRAR NUEVO PACIENTE (INLINE)
+# ================================================== 
 # ==================================================
+# FORMULARIO: REGISTRAR NUEVO PACIENTE (INLINE)
+# ================================================== 
 if st.session_state.get("mostrar_crear_paciente", False):
     st.divider()
     st.markdown("#### 👤 Registrar Nuevo Paciente")
     st.markdown("<br>", unsafe_allow_html=True)
     
+    # 1. CORRECCIÓN: Agregamos v_fono y v_cel que faltaban
     v_rut = ""
     v_nom = ""
     v_ap = ""
     v_am = ""
     v_fn = date(2000, 1, 1)
+    v_fono = "" 
+    v_cel = ""  
+    
     opts_prev = ["", "Fonasa", "Isapre", "Otra"]
     opts_sexo = ["", "Masculino", "Femenino"]
     
@@ -618,10 +665,23 @@ if st.session_state.get("mostrar_crear_paciente", False):
     key_celular = "celular_inline_nuevo"
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: rut_nuevo = st.text_input("RUT del paciente", value=v_rut, placeholder="Ej: 12.345.678-9", key=key_rut, on_change=formatear_rut_dinamico, args=(key_rut,))
-    with col2: nombres_nuevo = st.text_input("Nombres", value=v_nom, key="nom_inline")
-    with col3: apellido_paterno_nuevo = st.text_input("Apellido paterno", value=v_ap, key="ap_inline")
-    with col4: apellido_materno_nuevo = st.text_input("Apellido materno", value=v_am, key="am_inline")
+    with col1: 
+        # 2. CORRECCIÓN: Mantenemos el nombre rut_nuevo para que coincida con el guardado
+        rut_nuevo = st.text_input(
+            "RUT del paciente",
+            value=v_rut,
+            placeholder="Ej: 12.345.678-9",
+            max_chars=12,
+            key=key_rut,
+            on_change=formatear_rut_dinamico,
+            args=(key_rut,)
+        )        
+    with col2: 
+        nombres_nuevo = st.text_input("Nombres", value=v_nom, key="nom_inline")
+    with col3: 
+        apellido_paterno_nuevo = st.text_input("Apellido paterno", value=v_ap, key="ap_inline")
+    with col4: 
+        apellido_materno_nuevo = st.text_input("Apellido materno", value=v_am, key="am_inline")
 
     col5, col6, col7, col8 = st.columns(4)
     with col5:
@@ -629,7 +689,6 @@ if st.session_state.get("mostrar_crear_paciente", False):
     with col6:
         hoy = date.today()
         edad_paciente = hoy.year - fecha_nacimiento_nuevo.year - ((hoy.month, hoy.day) < (fecha_nacimiento_nuevo.month, fecha_nacimiento_nuevo.day))
-        # SOLUCIÓN: Quitamos el parámetro key para que el valor se actualice visualmente
         st.text_input("Edad calculada", value=f"{edad_paciente} años", disabled=True)
     with col7:
         prevision_nuevo = st.selectbox("Previsión", opts_prev, index=0, key="prev_inline")
@@ -637,9 +696,87 @@ if st.session_state.get("mostrar_crear_paciente", False):
         sexo_nuevo = st.selectbox("Sexo", opts_sexo, index=0, key="sexo_inline")        
 
     col9, col10, col11 = st.columns(3)
-    with col9: fono_fijo_nuevo = st.text_input("Fono fijo", value="", placeholder="Ej: +56 22 123 4567", key=key_fono, on_change=formatear_telefono_dinamico, args=(key_fono,))
-    with col10: celular_nuevo = st.text_input("Celular", value="", placeholder="Ej: +56 987 654 321", key=key_celular, on_change=formatear_telefono_dinamico, args=(key_celular,))
-    with col11: email_nuevo = st.text_input("Email", value="", placeholder="ejemplo@correo.com", key="email_inline")
+    
+    # Diccionario de prefijos con la opción "OTRO" al final
+    dic_prefijos = {
+        "+56": "🇨🇱 +56",
+        "+54": "🇦🇷 +54",
+        "+51": "🇵🇪 +51",
+        "+57": "🇨🇴 +57",
+        "+52": "🇲🇽 +52",
+        "+58": "🇻🇪 +58",
+        "+593": "🇪🇨 +593",
+        "+591": "🇧🇴 +591",
+        "+595": "🇵🇾 +595",
+        "+598": "🇺🇾 +598",
+        "+55": "🇧🇷 +55",
+        "+1":  "🇺🇸/🇨🇦 +1",
+        "+34": "🇪🇸 +34",
+        "OTRO": "🌍 Otro..." # <- Opción comodín
+    }
+    lista_prefijos = list(dic_prefijos.keys())
+
+    with col9: 
+        c_pref1, c_num1 = st.columns([1, 2])
+        with c_pref1:
+            sel_pref_fono = st.selectbox(
+                "Cód.", 
+                options=lista_prefijos, 
+                index=0, 
+                format_func=lambda x: dic_prefijos[x], 
+                key="pref_fono_inline"
+            )
+            # Si el usuario elige "Otro...", mostramos un campo para que lo escriba
+            if sel_pref_fono == "OTRO":
+                prefijo_fono = st.text_input("Escriba Cód.", value="+", key="fono_manual_inline")
+            else:
+                prefijo_fono = sel_pref_fono
+
+        with c_num1:
+            fono_base = st.text_input(
+                "Fono fijo", 
+                value="", 
+                placeholder="22 123 4567", 
+                key="fono_base_inline", 
+                max_chars=11, 
+                on_change=formatear_telefono_dinamico, 
+                args=("fono_base_inline",)
+            )
+        
+        # Unimos usando el prefijo final (ya sea el del selector o el manual)
+        fono_fijo_nuevo = f"{prefijo_fono} {fono_base.strip()}" if fono_base.strip() else ""
+
+    with col10: 
+        c_pref2, c_num2 = st.columns([1, 2])
+        with c_pref2:
+            sel_pref_cel = st.selectbox(
+                "Cód.", 
+                options=lista_prefijos, 
+                index=0, 
+                format_func=lambda x: dic_prefijos[x], 
+                key="pref_cel_inline"
+            )
+            # Lógica idéntica para el celular
+            if sel_pref_cel == "OTRO":
+                prefijo_cel = st.text_input("Escriba Cód.", value="+", key="cel_manual_inline")
+            else:
+                prefijo_cel = sel_pref_cel
+
+        with c_num2:
+            celular_base = st.text_input(
+                "Celular", 
+                value="", 
+                placeholder="987 654 321", 
+                max_chars=11, 
+                key="celular_base_inline", 
+                on_change=formatear_telefono_dinamico, 
+                args=("celular_base_inline",)
+            )
+            
+        celular_nuevo = f"{prefijo_cel} {celular_base.strip()}" if celular_base.strip() else ""
+
+    with col11: 
+        email_nuevo = st.text_input("Email", value="", placeholder="ejemplo@correo.com", key="email_inline")
 
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -677,7 +814,6 @@ if st.session_state.get("mostrar_crear_paciente", False):
                         session.add(nuevo_p)
                         session.commit()
                         
-                        # NUEVA LÍNEA CORREGIDA (Usamos una variable temporal):
                         st.session_state["paciente_recien_creado"] = rut_limpio
                         
                         st.session_state["mostrar_crear_paciente"] = False
@@ -805,13 +941,17 @@ categorias_tabs = ["Datos Generales"] + list(tabs_estructura.keys()) + ["📝 In
 tabs = st.tabs(categorias_tabs)
 
 # --- PESTAÑA 1: DATOS GENERALES ---
+# --- PESTAÑA 1: DATOS GENERALES ---
 with tabs[0]:
     st.markdown("<br>", unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
     with col1: 
-        lista_medicos = ["Seleccione", "Dr. Eric Fuentes Latorre", "Dr. Felipe Norambuena R.", "Dr. Jorge Ardiles González", "Dr. Viet Nguyen", "Otro..."]
-        medico_seleccionado = st.selectbox("Médico responsable", lista_medicos)
+        # Construimos las opciones sumando la lista en memoria + "Otro..."
+        opciones_selector = st.session_state["lista_medicos_bd"] + ["Otro..."]
+        
+        medico_seleccionado = st.selectbox("Médico responsable", opciones_selector)
+        
         if medico_seleccionado == "Otro...":
             medico = st.text_input("Especifique el médico", placeholder="Nombre del médico")
         else:
@@ -984,7 +1124,9 @@ if paciente_existente:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-if st.button("💾 Guardar estudio en Base de Datos", type="primary"):
+if st.button("💾 Guardar Estudio", type="primary"):
+    
+    # 1. PRIMERO: Validaciones (si algo falla aquí, st.stop() detiene el proceso)
     if not rut or not paciente_existente:
         st.error("❌ Debe buscar y seleccionar un paciente existente antes de guardar el estudio.")
         st.stop()
@@ -995,6 +1137,7 @@ if st.button("💾 Guardar estudio en Base de Datos", type="primary"):
             st.error(f"❌ Debe completar: {variable.nombre}")
             st.stop()
 
+    # 2. SEGUNDO: Intentar guardar en la Base de Datos
     session = SessionLocal()
     try:
         def str_to_float(val):
@@ -1029,11 +1172,25 @@ if st.button("💾 Guardar estudio en Base de Datos", type="primary"):
                 med.valor_texto = str(val_ingresado)
             session.add(med)
 
-        session.commit()
+        session.commit() # Si llegamos aquí, se guardó todo en la BD con éxito
+        
+        # 3. TERCERO: Guardar el médico temporal en session_state
+        if medico_seleccionado == "Otro..." and medico.strip() != "":
+            medico_limpio = medico.strip()
+            if medico_limpio not in st.session_state["lista_medicos_bd"]:
+                st.session_state["lista_medicos_bd"].append(medico_limpio)
+
+        # 4. CUARTO: Mensajes de éxito
         st.success("✅ Estudio guardado exitosamente.")
         st.balloons()
+        
+        # Nota sobre st.rerun(): Si usas st.rerun() inmediatamente, los globos no se verán 
+        # porque la página se recarga al instante. Si quieres limpiar el formulario, 
+        # puedes usar time.sleep(2) antes del st.rerun() o simplemente dejar que el usuario 
+        # navegue de forma natural tras el éxito.
+        
     except Exception as e:
         session.rollback()
-        st.error(f"❌ Error al guardar: {e}")
+        st.error(f"❌ Error al guardar en la base de datos: {e}")
     finally:
         session.close()
