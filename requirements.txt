@@ -26,6 +26,7 @@ patsy==1.0.2
 pillow==12.2.0
 plotly==6.8.0
 protobuf==7.35.1
+psycopg2-binary==2.9.12
 pyarrow==24.0.0
 pydeck==0.9.2
 python-dateutil==2.9.0.post0
