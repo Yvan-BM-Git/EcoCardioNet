@@ -180,9 +180,10 @@ try:
     total_pacientes = session.query(Paciente).count()
     total_estudios = session.query(Estudio).count()
     
+    # Versión limpia y segura para PostgreSQL usando rangos de fecha del mes actual
+    inicio_mes = datetime(hoy.year, hoy.month, 1)
     estudios_este_mes = session.query(Estudio).filter(
-        func.extract('month', Estudio.fecha_creacion) == hoy.month,
-        func.extract('year', Estudio.fecha_creacion) == hoy.year
+        Estudio.fecha_creacion >= inicio_mes
     ).count()
     
     medicos_activos = session.query(Estudio.medico).filter(Estudio.medico.isnot(None)).distinct().count()

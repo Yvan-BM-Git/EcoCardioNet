@@ -12,7 +12,13 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # 2. Crear el motor de conexión para PostgreSQL
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,             # Número máximo de conexiones simultáneas persistentes
+    max_overflow=10,         # Conexiones extra permitidas en picos de tráfico
+    pool_recycle=180,        # Reciclar conexiones cada 3 minutos (Evita el cierre de Neon)
+    pool_pre_ping=True       # Verifica si la conexión sigue viva antes de usarla
+)
 
 # 3. Configurar la fábrica de sesiones
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
