@@ -140,6 +140,54 @@ EcoCardioNet/
 └── README.md
 ```
 
+## 📊 Diagrama de Flujo de la Aplicación
+
+El siguiente diagrama representa el flujo principal de navegación y procesos de EcoCardioNet, desde la autenticación hasta la generación de reportes.
+
+```mermaid
+flowchart TD
+    A([Inicio]) --> B[Pantalla de Login]
+    B --> C{¿Autenticación correcta?}
+    C -->|No| D[Mostrar error y reintentar]
+    D --> B
+    C -->|Sí| E[Dashboard principal]
+
+    E --> F[Menú de navegación]
+    F --> G[Gestión de Pacientes]
+    F --> H[Registro de Estudios]
+    F --> I[Historial Clínico]
+    F --> J[Generar Reporte PDF]
+    F --> K[Cerrar sesión]
+
+    G --> G1[Lista de pacientes]
+    G1 --> G2[Búsqueda/Filtro de pacientes]
+    G2 --> G3[Seleccionar paciente]
+    G3 --> G4[Ver/Editar datos del paciente]
+    G4 --> G5{¿Guardar cambios?}
+    G5 -->|Sí| G6[Actualizar BD]
+    G5 -->|No| G1
+    G6 --> G1
+
+    H --> H1[Seleccionar paciente]
+    H1 --> H2[Completar formulario de estudio]
+    H2 --> H3[Validar datos]
+    H3 -->|Error| H4[Mostrar errores]
+    H4 --> H2
+    H3 -->|OK| H5[Guardar estudio en BD]
+    H5 --> H6[Mostrar confirmación]
+
+    I --> I1[Ver estudios previos]
+    I1 --> I2[Detalle de cada estudio]
+    I2 --> I3[Opción de descargar PDF]
+    I3 --> J
+
+    J --> J1[Seleccionar estudio]
+    J1 --> J2[Generar PDF con ReportLab]
+    J2 --> J3[Ofrecer descarga]
+
+    K --> L([Fin de sesión])
+
+
 ### Descripción de los Componentes
 
 | Archivo / Carpeta | Descripción |
