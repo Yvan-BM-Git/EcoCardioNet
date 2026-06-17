@@ -186,6 +186,7 @@ flowchart TD
     J2 --> J3[Ofrecer descarga]
 
     K --> L([Fin de sesión])
+```
 
 
 ### Descripción de los Componentes
