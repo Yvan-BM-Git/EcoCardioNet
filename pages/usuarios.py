@@ -142,15 +142,24 @@ with tab2:
         
         if usuarios_db:
             lista_usuarios = []
-            todos_los_ruts = [] 
+            todos_los_ruts = []
+            # 🔥 Obtener el RUT del usuario que ha iniciado sesión
+            usuario_actual_rut = st.session_state.get("usuario_actual", {}).get("rut")
             
             for user, rol in usuarios_db:
+                # Determinar si este usuario es el que está usando la app
+                if usuario_actual_rut and user.rut == usuario_actual_rut:
+                    estado_sesion = "🟢 Activo"
+                else:
+                    estado_sesion = "🔴 Inactivo"
+                
                 lista_usuarios.append({
                     "RUT": user.rut,
                     "Nombre Completo": user.nombre,
                     "Email": user.email if user.email else "No registrado",
                     "Rol asignado": rol.nombre,
-                    "Estado": "🟢 Activo" if user.activo else "🔴 Inactivo"
+                    "Estado de sesión": estado_sesion,
+                    "Cuenta habilitada": "✅ Sí" if user.activo else "❌ No"
                 })
                 todos_los_ruts.append(user.rut)
             
