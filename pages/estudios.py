@@ -85,6 +85,7 @@ def formatear_telefono_dinamico(k):
     else:
         st.session_state[k] = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
 
+##############################################################################
 st.title("📝 Nuevo Estudio Ecocardiográfico")
 
 st.markdown("""
@@ -96,6 +97,62 @@ section[data-testid="stMain"] > div:first-child {
 [data-testid="stTextInput"] input,
 [data-testid="stSelectbox"] > div {
     max-width: 250px;
+}
+
+/* --- NUEVOS ESTILOS PARA EL TOOLTIP NO ENFOCABLE --- */
+.tooltip-container {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: default;
+}
+.tooltip-icon {
+    margin-left: 6px;
+    color: #A0AEC0;
+    border: 1px solid #A0AEC0;
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: bold;
+}
+.tooltip-text {
+    visibility: hidden;
+    width: 240px;
+    background-color: #2D3748;
+    color: #FFFFFF;
+    text-align: left;
+    border-radius: 6px;
+    padding: 8px 12px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 130%;
+    left: 50%;
+    transform: translateX(-50%);
+    opacity: 0;
+    transition: opacity 0.2s;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    font-size: 12px;
+    font-weight: normal;
+    line-height: 1.4;
+    pointer-events: none;
+}
+.tooltip-container:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+.tooltip-text::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 6px;
+    border-style: solid;
+    border-color: #2D3748 transparent transparent transparent;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -541,15 +598,24 @@ def calcular_asc():
 if "asc_val" not in st.session_state:
     st.session_state.asc_val = ""
 
+
 def renderizar_variable(variable, col_contenedor):
     with col_contenedor:
         col_nombre, col_input, col_unidad = st.columns([3, 2, 1])
 
         with col_nombre:
             if variable.descripcion:
-                st.markdown(f"<div style='padding-bottom:4px; font-size:15px; color:#4A5568'>{variable.nombre}</div>", help=variable.descripcion, unsafe_allow_html=True)
+                # Reemplazamos st.markdown nativo con estructura HTML inmune al TAB
+                html_label = f"""
+                <div class="tooltip-container" style="padding-bottom:4px; font-size:15px; color:#4A5568">
+                    <span>{variable.nombre}</span>
+                    <span class="tooltip-icon">?</span>
+                    <span class="tooltip-text">{variable.descripcion}</span>
+                </div>
+                """
+                st.markdown(html_label, unsafe_allow_html=True)
             else:
-                st.markdown(f"**{variable.nombre}**") 
+                st.markdown(f"<div style='padding-bottom:4px; font-size:15px; color:#4A5568'><b>{variable.nombre}</b></div>", unsafe_allow_html=True) 
 
         with col_input:
             if variable.tipo == "numero":
@@ -956,8 +1022,7 @@ valores = {}
 categorias_tabs = ["Datos Generales"] + list(tabs_estructura.keys()) + ["📝 Informe Clínico"]
 tabs = st.tabs(categorias_tabs)
 
-# --- PESTAÑA 1: DATOS GENERALES ---
-# --- PESTAÑA 1: DATOS GENERALES ---
+# --- PESTAÑA 1: DATOS GENERALES --- 
 with tabs[0]:
     st.markdown("<br>", unsafe_allow_html=True)
     
