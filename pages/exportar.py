@@ -28,7 +28,6 @@ from datetime import date, datetime
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Medicion, Variable
 
-# st.set_page_config(page_title="Exportar Datos", layout="wide")
 st.title("📥 Exportación de Base de Datos para Investigación")
 
 st.markdown("""
@@ -67,29 +66,30 @@ try:
                 'rut': pac.rut,
                 # 'nombres': pac.nombres,
                 # 'apellidos': f"{pac.apellido_paterno} {pac.apellido_materno or ''}".strip(),
-                'fecha_nacimiento': f_nac_str,
+                # 'fecha_nacimiento': f_nac_str,
                 'edad_calculada': edad,
                 'prevision': getattr(pac, 'prevision', None),
                 'sexo': pac.sexo,
-                'fono_fijo': getattr(pac, 'fono_fijo', None),
-                'celular': pac.telefono,
-                'email': pac.email,
+                # 'fono_fijo': getattr(pac, 'fono_fijo', None),
+                # 'celular': pac.telefono,
+                # 'email': pac.email,
                 'fecha_estudio': f_est_str,
                 'medico_responsable': est.medico,
                 'tipo_estudio': est.tipo_estudio,
-                'ficha_clinica': getattr(est, 'ficha_clinica', None),
+                # 'ficha_clinica': getattr(est, 'ficha_clinica', None),
                 'patologia_de_base': getattr(est, 'diagnostico', None),
                 'servicio_origen': getattr(est, 'procedencia', None),
                 'servicio_destino': getattr(est, 'destino', None),
                 'peso_kg': getattr(est, 'peso', None),
                 'talla_cm': getattr(est, 'talla', None),
                 'asc': getattr(est, 'asc_valor', None),
+                'imc': getattr(est, 'imc_valor', None),  # <-- corregido: el atributo del modelo es 'imc', no 'imc_valor'
                 'pas': getattr(est, 'pas', None),
                 'pad': getattr(est, 'pad', None),
                 'ritmo': getattr(est, 'ritmo', None),
                 'fcia': getattr(est, 'fcia', None),
-                'eco_3d': getattr(est, 'eco_3d', None),
-                'eco_estres': getattr(est, 'eco_estres', None)
+                # 'eco_3d': getattr(est, 'eco_3d', None),
+                # 'eco_estres': getattr(est, 'eco_estres', None)
             })
             
         df_base = pd.DataFrame(datos_base)
@@ -98,45 +98,69 @@ try:
             st.warning("No hay estudios registrados en la base de datos.")
         else:
             # ==========================================
-            # PASO 2: RESCATAR MEDICIONES Y PIVOTAR
+            # PASO 2: RESCATAR MEDICIONES Y PIVOTAR POR CÓDIGO (ÚNICO)
             # ==========================================
+            # IMPORTANTE: pivotamos por 'codigo_variable' (siempre único), NO por el nombre
+            # visible de la variable. Dos variables clínicamente distintas pueden compartir
+            # el mismo nombre (ej. "Onda E" en Válvula Mitral y en Válvula Tricúspide);
+            # pivotar por nombre las mezclaría en una sola columna y perdería datos.
             mediciones_db = session.query(
-                Medicion.estudio_id, Variable.nombre.label('variable'), Medicion.valor_num, Medicion.valor_texto
-            ).join(Variable, Medicion.codigo_variable == Variable.codigo).all()
-            
+                Medicion.estudio_id, Medicion.codigo_variable, Medicion.valor_num, Medicion.valor_texto
+            ).all()
+
             if mediciones_db:
                 df_med = pd.DataFrame(mediciones_db)
                 df_med['valor_final'] = df_med['valor_num'].astype(object).fillna(df_med['valor_texto'])
-                
-                # Al pivotar SOLO por estudio_id evitamos que Pandas elimine filas por datos demográficos vacíos
+
                 df_ancha_mediciones = df_med.pivot_table(
-                    index='estudio_id', 
-                    columns='variable', 
-                    values='valor_final', 
+                    index='estudio_id',
+                    columns='codigo_variable',
+                    values='valor_final',
                     aggfunc='first'
                 ).reset_index()
             else:
                 df_ancha_mediciones = pd.DataFrame(columns=['estudio_id'])
 
             # ==========================================
-            # PASO 3: UNIR BASE ESTÁTICA + VARIABLES
+            # PASO 3: UNIR BASE ESTÁTICA + VARIABLES (aún indexado por código)
             # ==========================================
             df_final = pd.merge(df_base, df_ancha_mediciones, on='estudio_id', how='left')
 
             # ==========================================
-            # PASO 4: INYECTAR TODAS LAS COLUMNAS RESTANTES
+            # PASO 4: INYECTAR TODAS LAS COLUMNAS RESTANTES Y CONSTRUIR NOMBRES LEGIBLES
             # ==========================================
-            todas_las_variables_db = session.query(Variable.nombre).all()
-            nombres_todas_variables = sorted([v[0] for v in todas_las_variables_db if v[0]])
+            todas_las_variables_db = session.query(Variable.codigo, Variable.nombre, Variable.categoria).all()
 
-            for var in nombres_todas_variables:
-                if var not in df_final.columns:
-                    df_final[var] = np.nan
+            # Contamos cuántas veces se repite cada nombre visible (limpiando espacios)
+            conteo_nombres = {}
+            for cod, nom, cat in todas_las_variables_db:
+                nom_limpio = (nom or cod).strip()
+                conteo_nombres[nom_limpio] = conteo_nombres.get(nom_limpio, 0) + 1
 
-            # Ordenar columnas
+            # Mapeo codigo -> nombre a mostrar en la columna final.
+            # Si el nombre está repetido, lo desambiguamos agregando la categoría.
+            mapeo_codigo_a_nombre = {}
+            for cod, nom, cat in todas_las_variables_db:
+                nom_limpio = (nom or cod).strip()
+                if conteo_nombres[nom_limpio] > 1:
+                    cat_limpia = (cat or "").strip()
+                    mapeo_codigo_a_nombre[cod] = f"{nom_limpio} ({cat_limpia})" if cat_limpia else f"{nom_limpio} [{cod}]"
+                else:
+                    mapeo_codigo_a_nombre[cod] = nom_limpio
+
+            codigos_ordenados = sorted(mapeo_codigo_a_nombre.keys(), key=lambda c: mapeo_codigo_a_nombre[c])
+
+            for cod in codigos_ordenados:
+                if cod not in df_final.columns:
+                    df_final[cod] = np.nan
+
+            # Ordenar columnas (todavía por código)
             columnas_estaticas = list(df_base.columns)
-            columnas_variables_presentes = [c for c in nombres_todas_variables if c in df_final.columns]
-            df_final = df_final[columnas_estaticas + columnas_variables_presentes]
+            columnas_codigos_presentes = [c for c in codigos_ordenados if c in df_final.columns]
+            df_final = df_final[columnas_estaticas + columnas_codigos_presentes]
+
+            # Renombramos las columnas de variables a su nombre legible (ya desambiguado)
+            df_final = df_final.rename(columns=mapeo_codigo_a_nombre)
 
             st.success(f"✅ Se han procesado exitosamente **{len(df_final)} filas**.")
 
@@ -157,6 +181,68 @@ try:
                 df_final.to_excel(writer, index=False, sheet_name='Base_Investigacion')
             with col2:
                 st.download_button("📊 Descargar Dataset Excel", buffer.getvalue(), f"Dataset_EcoCardioNet_{date.today().strftime('%Y%m%d')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+            # ==========================================
+            # PASO 5: ELIMINAR ESTUDIOS (SOLO ADMINISTRADOR)
+            # ==========================================
+            # Ajusta este valor si el nombre del rol de administrador en tu tabla Rol es distinto
+            NOMBRE_ROL_ADMIN = "Administrador"
+
+            rol_actual = st.session_state.get("usuario_actual", {}).get("rol", "")
+            es_admin = rol_actual.strip().lower() == NOMBRE_ROL_ADMIN.lower()
+
+            if es_admin:
+                st.divider()
+                st.subheader("🗑️ Eliminar Estudios (solo Administrador)")
+                st.caption(
+                    "Marca las filas que deseas eliminar. Esta acción borra el estudio y "
+                    "**todas sus mediciones asociadas** de forma permanente, tanto de la base "
+                    "de datos como de esta tabla de exportación."
+                )
+
+                columnas_id = ["estudio_id", "rut", "fecha_estudio", "medico_responsable", "tipo_estudio"]
+                columnas_id_presentes = [c for c in columnas_id if c in df_final.columns]
+
+                df_seleccion = df_final[columnas_id_presentes].copy()
+                df_seleccion.insert(0, "Eliminar", False)
+
+                df_editado = st.data_editor(
+                    df_seleccion,
+                    hide_index=True,
+                    use_container_width=True,
+                    disabled=columnas_id_presentes,
+                    key="editor_eliminar_estudios"
+                )
+
+                filas_marcadas = df_editado[df_editado["Eliminar"] == True]
+
+                if not filas_marcadas.empty:
+                    st.warning(f"⚠️ Has seleccionado **{len(filas_marcadas)}** estudio(s) para eliminar.")
+                    confirmar_borrado = st.checkbox(
+                        "Entiendo que esta acción es irreversible y eliminará también todas las mediciones asociadas.",
+                        key="confirmar_borrado_estudios"
+                    )
+
+                    if confirmar_borrado:
+                        if st.button("🗑️ Eliminar definitivamente", type="primary"):
+                            ids_a_borrar = filas_marcadas["estudio_id"].tolist()
+                            session_del = SessionLocal()
+                            try:
+                                # Primero las mediciones (dependen del estudio), luego el estudio
+                                session_del.query(Medicion).filter(
+                                    Medicion.estudio_id.in_(ids_a_borrar)
+                                ).delete(synchronize_session=False)
+                                session_del.query(Estudio).filter(
+                                    Estudio.id.in_(ids_a_borrar)
+                                ).delete(synchronize_session=False)
+                                session_del.commit()
+                                st.success(f"✅ Se eliminaron {len(ids_a_borrar)} estudio(s) correctamente.")
+                                st.rerun()
+                            except Exception as e:
+                                session_del.rollback()
+                                st.error(f"❌ Error al eliminar: {e}")
+                            finally:
+                                session_del.close()
 
 except Exception as e:
     st.error(f"Error procesando la exportación: {e}")

@@ -8,7 +8,8 @@ from sqlalchemy import (
     DateTime,
     Boolean,
     ForeignKey,
-    Text
+    Text,
+    LargeBinary,   # <-- AGREGADO
 )
 
 from datetime import datetime
@@ -48,10 +49,9 @@ class Paciente(Base):
     telefono = Column(String) # Aquí estamos guardando el Celular
     email = Column(String)
 
-    # --- NUEVOS CAMPOS AGREGADOS ---
+# --- NUEVOS CAMPOS AGREGADOS ---
     prevision = Column(String, nullable=True)
     fono_fijo = Column(String, nullable=True)
-    
     fecha_creacion = Column(DateTime, default=datetime.utcnow)
 
 
@@ -69,17 +69,22 @@ class Estudio(Base):
     fecha_creacion = Column(DateTime, default=datetime.utcnow)
     estado = Column(String, default="Validado")
 
-    # --- NUEVOS CAMPOS GENERALES DEL ECOCARDIOGRAMA ---
+# --- NUEVOS CAMPOS GENERALES DEL ECOCARDIOGRAMA ---
     diagnostico = Column(String, nullable=True)
     procedencia = Column(String, nullable=True)
     ficha_clinica = Column(String, nullable=True)
     peso = Column(Float, nullable=True)
     talla = Column(Float, nullable=True)
     asc_valor = Column(Float, nullable=True)
+    imc = Column(Float, nullable=True)
     pas = Column(Integer, nullable=True)
     pad = Column(Integer, nullable=True)
     ritmo = Column(String, nullable=True)
     fcia = Column(Integer, nullable=True)
+
+# --- NUEVO: INFORME PDF IMPORTADO ---
+    pdf_original = Column(LargeBinary, nullable=True)
+    pdf_nombre_archivo = Column(String, nullable=True)
 
     mediciones = relationship("Medicion", back_populates="estudio")
 
@@ -100,6 +105,7 @@ class Variable(Base):
     derivada_de = Column(String)
     obligatoria = Column(String)
     grupo_analitico = Column(String)
+    orden = Column(Integer, nullable=True) 
 
 
 class Medicion(Base):
