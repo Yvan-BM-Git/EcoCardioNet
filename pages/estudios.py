@@ -11,11 +11,15 @@ from menu import generar_menu
 # 1. Dibujar el menú dinámico
 generar_menu()
 
-# 2. Candado de seguridad
+# 2. Candado de seguridad: Para que el usuario no pueda acceder a esta página sin iniciar sesión
 if not st.session_state.get("autenticado", False):
     st.warning("🛑 Debes iniciar sesión para ver esta página.")
-    st.stop()
-     
+    # Botón para redirigir al login
+    if st.button("🔑 Ir a Iniciar Sesión"):
+        st.session_state["vista_actual"] = "login" # Nos aseguramos de que app.py muestre la pantalla de login (no la de recuperar)
+        st.switch_page("app.py")                   # Nombre del script principal
+    st.stop()     
+
 import pandas as pd
 from datetime import date, datetime
 import io
