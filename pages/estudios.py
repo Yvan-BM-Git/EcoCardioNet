@@ -167,7 +167,7 @@ section[data-testid="stMain"] > div:first-child {
 # =====================================================================
 _session = SessionLocal()
 try:
-    variables_db = _session.query(Variable).order_by(Variable.categoria, Variable.nombre).all()
+    variables_db = _session.query(Variable).order_by(Variable.categoria, Variable.orden).all()
     variables_por_codigo = {v.codigo: v for v in variables_db}
     
     # Estructura: { "Nombre Pestaña": { "Nombre Subsección": [Variables] } }
@@ -365,6 +365,7 @@ def generar_pdf_desde_historial(estudio, paciente, mediciones_estudio):
     ficha_clinica_p = estudio.ficha_clinica if hasattr(estudio, 'ficha_clinica') and estudio.ficha_clinica else "—"
     
     asc_val = f"{estudio.asc_valor} m2" if hasattr(estudio, 'asc_valor') and estudio.asc_valor else "—"
+    imc_val = f"{estudio.imc} kg/m2" if hasattr(estudio, 'imc') and estudio.imc else "—"
     ritmo_val = estudio.ritmo if hasattr(estudio, 'ritmo') and estudio.ritmo else "—"
     fcia_val = f"{estudio.fcia} Lpm" if hasattr(estudio, 'fcia') and estudio.fcia else "—"
     pas_val = estudio.pas if hasattr(estudio, 'pas') and estudio.pas else "___"
@@ -373,7 +374,7 @@ def generar_pdf_desde_historial(estudio, paciente, mediciones_estudio):
     # Matriz reorganizada para balancear perfectamente ambos lados
     data_header = [
         [Paragraph(f"<b>Paciente:</b> {nombre_p}", style_body), Paragraph(f"<b>R.U.T:</b> {paciente.rut}", style_body)],
-        [Paragraph(f"<b>ASC:</b> {asc_val}", style_body), Paragraph(f"<b>Ritmo:</b> {ritmo_val} &nbsp;&nbsp; <b>FC:</b> {fcia_val}", style_body)],
+        [Paragraph(f"<b>ASC:</b> {asc_val}", style_body), Paragraph(f"<b>IMC:</b> {imc_val} &nbsp;&nbsp; <b>Ritmo:</b> {ritmo_val} &nbsp;&nbsp; <b>FC:</b> {fcia_val}", style_body)],
         [Paragraph(f"<b>Edad:</b> {edad_p} Años &nbsp;&nbsp;&nbsp;", style_body), Paragraph(f"<b>Previsión:</b> {prevision_p}", style_body)],
         [Paragraph(f"<b>Dg.:</b> {estudio.diagnostico or '—'}", style_body), Paragraph(f"<b>PA:</b> {pas_val} / {pad_val} mm Hg", style_body)],
         [Paragraph(f"<b>Procedencia:</b> {estudio.procedencia or '—'}", style_body), Paragraph(f"<b>Ficha Clínica:</b> {ficha_clinica_p}", style_body)]
@@ -584,7 +585,12 @@ def formatear_telefono_callback():
     else:
         st.session_state.telefono_input = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
 
-def calcular_asc():
+# ==================================================
+# CÁLCULO AUTOMÁTICO DE ASC E IMC (UNIFICADO)
+# ==================================================
+# NOTA: Streamlit solo permite UN callback on_change por widget, por eso ASC e IMC
+# se calculan juntos en una sola función y se engancha a peso_input y talla_input.
+def calcular_asc_imc():
     try:
         p_val = st.session_state.get("peso_input", "").replace(",", ".")
         t_val = st.session_state.get("talla_input", "").replace(",", ".")
@@ -593,14 +599,23 @@ def calcular_asc():
             t = float(t_val)
             if p > 0 and t > 0:
                 asc_calc = 0.007184 * (p ** 0.425) * (t ** 0.725)
+                imc_calc = p / ((t / 100) ** 2)
                 st.session_state.asc_val = f"{asc_calc:.2f}"
+                st.session_state.imc_val = f"{imc_calc:.2f}"
             else:
                 st.session_state.asc_val = ""
+                st.session_state.imc_val = ""
+        else:
+            st.session_state.asc_val = ""
+            st.session_state.imc_val = ""
     except ValueError:
         st.session_state.asc_val = ""
+        st.session_state.imc_val = ""
 
 if "asc_val" not in st.session_state:
     st.session_state.asc_val = ""
+if "imc_val" not in st.session_state:
+    st.session_state.imc_val = ""
 
 
 def renderizar_variable(variable, col_contenedor):
@@ -667,7 +682,7 @@ try:
 finally:
     _session.close()
 
-col_link, col_search, col_seleccion = st.columns([1, 1, 1])
+col_link, col_search, col_seleccion = st.columns([1, 1, 1.5])
 
 with col_link:
     st.markdown("<br>", unsafe_allow_html=True)
@@ -723,9 +738,6 @@ if busqueda and not df_pacientes_todos.empty:
     else:
         st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
 
-# ==================================================
-# FORMULARIO: REGISTRAR NUEVO PACIENTE (INLINE)
-# ================================================== 
 # ==================================================
 # FORMULARIO: REGISTRAR NUEVO PACIENTE (INLINE)
 # ================================================== 
@@ -1014,6 +1026,7 @@ if rut_seleccionado:
 else:
     st.session_state["paciente_existente_sexo"] = None
     st.info("💡 Por favor, busque y seleccione un paciente existente, o registre uno nuevo para comenzar a capturar las mediciones del estudio.")
+    st.stop()
 
 # ==================================================
 # MEDICIONES Y DATOS GENERALES (SISTEMA DE PESTAÑAS)
@@ -1030,7 +1043,7 @@ tabs = st.tabs(categorias_tabs)
 with tabs[0]:
     st.markdown("<br>", unsafe_allow_html=True)
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns([3, 3, 1.5, 1.5])
     with col1: 
         # Construimos las opciones sumando la lista en memoria + "Otro..."
         opciones_selector = st.session_state["lista_medicos_bd"] + ["Otro..."]
@@ -1042,26 +1055,59 @@ with tabs[0]:
         else:
             medico = medico_seleccionado
             
-    with col2: fecha_estudio = st.date_input("Fecha estudio", value=date.today(), format="DD/MM/YYYY")
-    with col3: tipo_estudio = st.selectbox("Tipo de estudio", ["Ecocardiograma Transtorácico", "Ecocardiograma transesofágico (ECO TE)", "Ecocardiograma de estrés", "Ecocardiograma 3D"])
+    with col2: tipo_estudio = st.selectbox("Tipo de estudio", ["Ecocardiograma Transtorácico", "Ecocardiograma Transesofágico", "Ecocardiograma de Estrés", "Ecocardiograma 3D"])
+    with col3: fecha_estudio = st.date_input("Fecha estudio", value=date.today(), format="DD/MM/YYYY")
     with col4: ficha_clinica = st.text_input("Ficha Clínica")
 
     col5, col6, col7 = st.columns(3)
-    with col5: diagnostico = st.text_input("Patología de base", placeholder="Ej: HTA, Diabetes tipo 2, etc.")
+    with col5:
+        opciones_patologia = [
+            "Sin antecedentes",
+            "Hipertensión arterial (HTA)",
+            "Diabetes Mellitus tipo 2",
+            "Dislipidemia",
+            "Cardiopatía coronaria",
+            "Fibrilación auricular",
+            "Insuficiencia cardíaca",
+            "Enfermedad renal crónica",
+            "EPOC",
+            "Obesidad",
+            "Hipotiroidismo",
+            "Tabaquismo",
+            "Valvulopatía",
+            "Cardiopatía congénita",
+            "Otro..."
+        ]
+        patologias_seleccionadas = st.multiselect(
+            "Patología de base",
+            opciones_patologia,
+            placeholder="Selecciona una o más patologías"
+        )
+        otra_patologia = ""
+        if "Otro..." in patologias_seleccionadas:
+            otra_patologia = st.text_input(
+                "Especifique la(s) otra(s) patología(s)",
+                placeholder="Ej: Enfermedad de Chagas, etc."
+            )
+        lista_patologias_final = [p for p in patologias_seleccionadas if p != "Otro..."]
+        if otra_patologia.strip():
+            lista_patologias_final.append(otra_patologia.strip())
+        diagnostico = ", ".join(lista_patologias_final)
     with col6: procedencia = st.text_input("Servicio de origen", placeholder="Ej: HRT, CESFAM, Dr. Eric Fuentes, etc.")
     with col7: destino = st.text_input("Servicio de destino", placeholder="Ej: HRT, CESFAM, etc.")
     
 
-    cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8, cv9 = st.columns([1, 1, 1, 1, 1, 2, 1, 1.1, 1.1])
-    with cv1: peso = st.text_input("PESO (kg)", key="peso_input", on_change=calcular_asc)
-    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input", on_change=calcular_asc)
+    cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8 = st.columns([1, 1, 1, 1, 1, 1, 2, 1])
+    with cv1: peso = st.text_input("PESO (kg)", key="peso_input", on_change=calcular_asc_imc)
+    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input", on_change=calcular_asc_imc)
     with cv3: asc = st.text_input("ASC", value=st.session_state.asc_val, disabled=True)
-    with cv4: pas = st.text_input("PAS")
-    with cv5: pad = st.text_input("PAD") 
-    with cv6: ritmo = st.selectbox("Ritmo", ["", "Sinusal a", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal", "Braquicardia sinusal", "Fibrilación auricular a", "Flutter auricular a", "Marcapaso", "Otro"])
-    with cv7: fcia = st.text_input("FCia")
-    with cv8: eco_3d = st.selectbox("ECO 3D", ["", "Si", "No"])
-    with cv9: eco_estres = st.selectbox("ECO Estrés", ["", "Si", "No"])
+    with cv4: imc = st.text_input("IMC", value=st.session_state.imc_val, disabled=True)
+    with cv5: pas = st.text_input("PAS")
+    with cv6: pad = st.text_input("PAD") 
+    with cv7: ritmo = st.selectbox("Ritmo", ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal", "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular", "Marcapaso", "Otro"])
+    with cv8: fcia = st.text_input("FCia")
+    # with cv8: eco_3d = st.selectbox("ECO 3D", ["", "Si", "No"])
+    # with cv9: eco_estres = st.selectbox("ECO Estrés", ["", "Si", "No"])
 
     observaciones = st.text_area("Observaciones Generales")
 
@@ -1175,6 +1221,7 @@ est_sim = _EstudioSimulado()
 est_sim.fecha_estudio, est_sim.tipo_estudio, est_sim.medico, est_sim.diagnostico, est_sim.motivo, est_sim.fecha_creacion = fecha_estudio, tipo_estudio, medico, diagnostico, "", None
 est_sim.procedencia = procedencia
 est_sim.asc_valor = st.session_state.asc_val
+est_sim.imc = st.session_state.imc_val
 est_sim.ritmo = ritmo
 est_sim.fcia = fcia
 est_sim.pas = pas
@@ -1236,6 +1283,7 @@ if st.button("💾 Guardar Estudio", type="primary"):
             paciente_rut=rut.strip(), fecha_estudio=fecha_estudio, tipo_estudio=tipo_estudio, medico=medico, 
             diagnostico=diagnostico, procedencia=procedencia, ficha_clinica=ficha_clinica,
             peso=str_to_float(peso), talla=str_to_float(talla), asc_valor=str_to_float(st.session_state.asc_val),
+            imc=str_to_float(st.session_state.imc_val),
             pas=str_to_int(pas), pad=str_to_int(pad), ritmo=ritmo, fcia=str_to_int(fcia),
             observaciones=(f"{observaciones}\n\n[HALLAZGOS]:\n{findings_editado}\n\n[CONCLUSIONES]:\n{conclusiones_editadas}")
         )
