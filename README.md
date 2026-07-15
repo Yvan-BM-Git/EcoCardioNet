@@ -1,6 +1,6 @@
 # 🫀 EcoCardioNet
 
-**EcoCardioNet** es un sistema integral para el registro, análisis y seguimiento ecocardiográfico. Diseñado para optimizar el flujo de trabajo clínico, permite documentar exámenes médicos, gestionar datos de pacientes, calcular variables en tiempo real, analizar tendencias clínicas y generar reportes históricos automatizados en formato PDF de manera ágil, centralizada y segura.
+**EcoCardioNet** es un sistema integral para el registro, análisis y seguimiento ecocardiográfico. Diseñado para optimizar el flujo de trabajo clínico, permite documentar exámenes médicos, gestionar datos de pacientes, capturar mediciones estructuradas contra un catálogo dinámico de variables, importar informes PDF ya existentes, analizar tendencias clínicas —individuales y globales— y generar reportes profesionales en PDF de manera ágil, centralizada y segura.
 
 Actualmente, el sistema está completamente preparado para producción, utilizando una arquitectura moderna con persistencia en la nube.
 
@@ -9,47 +9,62 @@ Actualmente, el sistema está completamente preparado para producción, utilizan
 ## 🚀 Accesos Rápidos
 
 ### 👤 Gestionar Pacientes
-Agrega nuevos pacientes al sistema o actualiza sus antecedentes demográficos para comenzar a vincular sus respectivos estudios ecocardiográficos.
+Agrega nuevos pacientes al sistema o actualiza sus antecedentes demográficos (incluida previsión y teléfono fijo) para comenzar a vincular sus respectivos estudios ecocardiográficos.
 
 **Acceso en la App:** *Ir a Pacientes* (`pages/pacientes.py`)
 
 ### 🩺 Registrar un Examen
-Ingresa los datos clínicos detallados, antecedentes de interés y documenta las mediciones del ecocardiograma del paciente de manera estructurada.
+Ingresa los datos clínicos detallados, antecedentes de interés y documenta las mediciones del ecocardiograma mediante un formulario dinámico generado a partir del catálogo de variables. Permite generar e imprimir el informe en PDF al finalizar.
 
 **Acceso en la App:** *Ir a Nuevo Estudio* (`pages/estudios.py`)
 
 ### 📁 Ver Historial Clínico
-Busca pacientes existentes a través de filtros inteligentes, analiza la evolución longitudinal de sus métricas a lo largo del tiempo y revisa exámenes anteriores.
+Busca pacientes existentes a través de filtros inteligentes, **importa informes PDF previos** (extracción automática de datos del paciente y mediciones), analiza la evolución longitudinal de sus métricas con gráficos interactivos y revisa exámenes anteriores.
 
 **Acceso en la App:** *Ir a Historial* (`pages/historial.py`)
 
-### 📤 Exportar Reportes y Datos
-Módulo especializado para la generación formal de informes clínicos en formato PDF listos para distribución y la exportación de registros consolidados.
+### 📤 Exportar Datos de Investigación
+Genera una matriz de datos estructurada (una fila por estudio, una columna por variable) lista para análisis estadístico, descargable en CSV o Excel. Incluye eliminación segura de estudios para administradores.
 
 **Acceso en la App:** *Ir a Exportar* (`pages/exportar.py`)
+
+### 👥 Gestión de Usuarios
+Administración de cuentas y roles del sistema, disponible exclusivamente para el rol **Administrador**.
+
+**Acceso en la App:** *Ir a Usuarios* (`pages/usuarios.py`)
 
 ---
 
 ## 🛠️ Características Principales
 
-- **Persistencia Confiable en la Nube:** Migrado a PostgreSQL para garantizar la permanencia de los datos en entornos de despliegue como Streamlit Community Cloud.
-- **Autenticación Avanzada y Segura:** Pantallas de Inicio de Sesión y Auto-recuperación de contraseñas con encriptación robusta (`Werkzeug`).
+- **Persistencia Confiable en la Nube:** PostgreSQL para garantizar la permanencia de los datos en entornos de despliegue como Streamlit Community Cloud.
+- **Autenticación Avanzada y Segura:** Pantallas de Inicio de Sesión y Auto-recuperación de contraseñas con encriptación robusta (`Werkzeug`), más soporte para gestores de contraseñas del navegador.
 - **Formateo Dinámico de RUT en Vivo:** Normalización y autocompletado automático de puntos y guión en tiempo real mediante callbacks de Streamlit.
-- **Gestión In-App de Pacientes:** Registro e inserción inteligente de pacientes mediante formularios y ventanas modales sin interrumpir el flujo de trabajo.
-- **Registro Estructurado de Estudios:** Almacenamiento organizado de mediciones ecocardiográficas y antecedentes clínicos.
-- **Historial Clínico Integrado:** Visualización cronológica de estudios previos y seguimiento de la evolución del paciente.
-- **Reportes Profesionales en PDF:** Generación automática de informes clínicos listos para impresión o distribución digital.
-- **Inicialización Automática:** El sistema crea de forma autónoma las tablas y los roles esenciales (`Administrador`, `Cardiólogo`, `Investigador`) en la base de datos durante su primer arranque.
+- **Catálogo Dinámico de Variables Ecocardiográficas:** Las variables clínicas (numéricas, categóricas, booleanas o de texto), sus rangos normales, unidades y agrupación analítica se definen centralizadamente en `variables_ecocardio.xlsx` y se cargan a la base de datos, generando automáticamente los formularios de captura por categoría/subsección.
+- **Registro Estructurado de Estudios:** Cada medición se guarda de forma normalizada (tabla `Medicion`, vinculada a `Estudio` y `Variable`), evitando pérdida de datos entre variables con nombres repetidos.
+- **Importación Inteligente de Informes PDF:** Extracción automática de datos generales del paciente y de mediciones desde informes ecocardiográficos en PDF ya existentes, para poblar el historial sin reingreso manual.
+- **Historial Clínico Integrado con Tendencias Interactivas:** Visualización cronológica de estudios previos y gráficos de tendencia por variable (Plotly), incluyendo una vista de **tendencia global** de una variable entre todos los pacientes con línea de ajuste LOWESS.
+- **Exportación para Investigación:** Generación de una matriz ancha (estudios × variables) descargable en CSV/Excel, con desambiguación automática de nombres de variables repetidos y cálculo de edad al momento del estudio.
+- **Eliminación Segura de Estudios:** Los administradores pueden marcar y eliminar estudios (y sus mediciones asociadas) desde el módulo de exportación, con confirmación explícita.
+- **Reportes Profesionales en PDF:** Generación de informes clínicos listos para impresión o distribución digital directamente desde el registro del estudio.
+- **Gestión de Usuarios y Roles (RBAC):** Módulo exclusivo para Administradores, con creación de cuentas y asignación de roles.
+- **Inicialización Automática de Esquema:** El sistema crea de forma autónoma las tablas en la base de datos durante su primer arranque mediante SQLAlchemy.
+- **Script de Siembra Inicial (`create_db.py`):** Crea los roles esenciales (`Administrador`, `Cardiólogo`, `Investigador`), un usuario administrador por defecto y carga/actualiza el catálogo completo de variables desde `variables_ecocardio.xlsx`, validando columnas requeridas y códigos duplicados.
 
 ---
 
 ## 📦 Tecnologías Utilizadas
 
 - **Frontend / Interfaz:** Streamlit
-- **Procesamiento de Datos:** Pandas
+- **Procesamiento de Datos:** Pandas, NumPy
+- **Visualización y Tendencias:** Plotly (incluye regresión LOWESS para tendencias globales)
+- **Análisis Estadístico:** SciPy, statsmodels
 - **Base de Datos / ORM:** SQLAlchemy & PostgreSQL (Alojado en Neon.tech)
 - **Conector de Base de Datos:** Psycopg2-binary
-- **Generación de Documentos:** ReportLab
+- **Generación de Documentos PDF:** ReportLab
+- **Lectura/Extracción de PDF:** pdfplumber, pdfminer.six, pypdfium2
+- **Manejo de Excel:** openpyxl
+- **Seguridad:** Werkzeug (hash de contraseñas)
 - **Lenguaje:** Python 3.10+
 
 ---
@@ -59,7 +74,7 @@ Módulo especializado para la generación formal de informes clínicos en format
 ### 1. Clonar el repositorio
 
 ```bash
-git clone [https://github.com/Yvan-BM-Git/EcoCardioNet.git](https://github.com/Yvan-BM-Git/EcoCardioNet.git)
+git clone https://github.com/Yvan-BM-Git/EcoCardioNet.git
 cd EcoCardioNet
 ```
 
@@ -89,18 +104,28 @@ pip install -r requirements.txt
 
 Por motivos de seguridad, las credenciales de la base de datos no se suben al repositorio. Debes configurar la cadena de conexión utilizando el sistema de secretos de Streamlit.
 
-Crea una carpeta llamada `.streamlit` en la raíz del proyecto y, dentro de ella, un archivo llamado `secrets.toml`:
+Crea una carpeta llamada `.streamlit` en la raíz del proyecto (si no existe) y, dentro de ella, un archivo llamado `secrets.toml`:
 
 ```toml
 # .streamlit/secrets.toml
 DATABASE_URL = "postgresql://usuario:contraseña@servidor-en-la-nube.com/neondb?sslmode=require"
 ```
 
-> ⚠️ **Nota:** Asegúrate de que el archivo `.streamlit/secrets.toml` se encuentre incluido en tu `.gitignore`. Si despliegas en **Streamlit Community Cloud**, deberás configurar esta misma variable en la sección *Advanced Settings -> Secrets* de tu panel de control.
+> ⚠️ **Nota:** Asegúrate de que el archivo `.streamlit/secrets.toml` se encuentre incluido en tu `.gitignore` (ya está excluido por defecto). Si despliegas en **Streamlit Community Cloud**, deberás configurar esta misma variable en la sección *Advanced Settings -> Secrets* de tu panel de control.
 
-### 5. Ejecutar la aplicación
+### 5. Inicializar roles, administrador y catálogo de variables
 
-Al iniciar la aplicación por primera vez, SQLAlchemy detectará la base de datos en la nube y creará automáticamente toda la estructura de tablas y roles necesarios. No requiere scripts de inicialización externos.
+La primera vez que se conecta a la base de datos, SQLAlchemy crea automáticamente el esquema de tablas. Para poblar los **roles del sistema**, un **usuario administrador por defecto** y el **catálogo completo de variables ecocardiográficas** (desde `variables_ecocardio.xlsx`), ejecuta:
+
+```bash
+python create_db.py
+```
+
+Este script valida que el Excel contenga las columnas requeridas (`Codigo`, `Categoria`, `Variable`, `Descripcion`, `Unidad`, `Tipo`, `Opciones`, `RangosNormales`, `Metodo`, `DerivadaDe`, `Obligatoria`, `GrupoAnalitico`) y que no existan códigos de variable duplicados antes de cargarlos.
+
+> 🔑 El administrador por defecto se crea con RUT `11111111-1`. Cambia su contraseña inmediatamente después del primer inicio de sesión, tanto en entornos locales como en producción.
+
+### 6. Ejecutar la aplicación
 
 ```bash
 streamlit run app.py
@@ -119,12 +144,14 @@ http://localhost:8501
 ```text
 EcoCardioNet/
 ├── app.py
+├── create_db.py
 ├── menu.py
 ├── requirements.txt
 ├── security.py
 ├── variables_ecocardio.xlsx
 │
-├── assets/
+├── .streamlit/
+│   └── config.toml
 │
 ├── database/
 │   ├── database.py
@@ -142,7 +169,7 @@ EcoCardioNet/
 
 ## 📊 Diagrama de Flujo de la Aplicación
 
-El siguiente diagrama representa el flujo principal de navegación y procesos de EcoCardioNet, desde la autenticación hasta la generación de reportes.
+El siguiente diagrama representa el flujo principal de navegación y procesos de EcoCardioNet, desde la autenticación hasta la generación de reportes y la exportación de datos.
 
 ```mermaid
 flowchart TD
@@ -156,7 +183,8 @@ flowchart TD
     F --> G[Gestión de Pacientes]
     F --> H[Registro de Estudios]
     F --> I[Historial Clínico]
-    F --> J[Generar Reporte PDF]
+    F --> J[Exportar Datos de Investigación]
+    F --> M[Gestión de Usuarios]
     F --> K[Cerrar sesión]
 
     G --> G1[Lista de pacientes]
@@ -169,40 +197,55 @@ flowchart TD
     G6 --> G1
 
     H --> H1[Seleccionar paciente]
-    H1 --> H2[Completar formulario de estudio]
+    H1 --> H2[Formulario dinámico según catálogo de Variables]
     H2 --> H3[Validar datos]
     H3 -->|Error| H4[Mostrar errores]
     H4 --> H2
-    H3 -->|OK| H5[Guardar estudio en BD]
-    H5 --> H6[Mostrar confirmación]
+    H3 -->|OK| H5[Guardar estudio y mediciones en BD]
+    H5 --> H6[Generar PDF del informe]
+    H6 --> H7[Ofrecer descarga]
 
     I --> I1[Ver estudios previos]
     I1 --> I2[Detalle de cada estudio]
-    I2 --> I3[Opción de descargar PDF]
-    I3 --> J
+    I2 --> I3{¿Importar PDF existente?}
+    I3 -->|Sí| I4[Extraer datos y mediciones del PDF]
+    I4 --> I5[Precargar/Guardar en BD]
+    I3 -->|No| I6[Graficar tendencias por paciente]
+    I1 --> I7[Tendencia global entre pacientes - LOWESS]
 
-    J --> J1[Seleccionar estudio]
-    J1 --> J2[Generar PDF con ReportLab]
-    J2 --> J3[Ofrecer descarga]
+    J --> J1[Construir matriz estudios x variables]
+    J1 --> J2[Descargar CSV / Excel]
+    J1 --> J3{¿Rol Administrador?}
+    J3 -->|Sí| J4[Seleccionar y eliminar estudios]
+    J4 --> J5[Confirmar eliminación]
+    J5 --> J1
+
+    M --> M1{¿Rol Administrador?}
+    M1 -->|No| M2[Acceso denegado]
+    M1 -->|Sí| M3[Crear/editar usuarios y roles]
 
     K --> L([Fin de sesión])
 ```
 
+---
 
 ### Descripción de los Componentes
 
-| Archivo / Carpeta | Descripción |
-| --- | --- |
-| `app.py` | Punto de entrada principal, manejo de sesión, login con formateo de RUT y panel de control. |
-| `menu.py` | Generador dinámico del menú de navegación lateral. |
-| `database/database.py` | Conexión a PostgreSQL en la nube y rutina de inicialización de tablas/roles. |
-| `database/models.py` | Definición de los modelos y entidades ORM mediante SQLAlchemy. |
-| `pages/estudios.py` | Registro, edición y documentación de mediciones ecocardiográficas. |
-| `pages/historial.py` | Consulta, filtros inteligentes y seguimiento longitudinal de pacientes. |
-| `pages/pacientes.py` | Gestión y registro demográfico de pacientes. |
-| `pages/usuarios.py` | Administración avanzada de cuentas de usuarios y roles del sistema. |
-| `pages/exportar.py` | Módulo encargado de estructurar y exportar reportes clínicos en PDF. |
-| `variables_ecocardio.xlsx` | Plantilla base con los rangos y variables ecocardiográficas de la aplicación. |
+| Archivo / Carpeta          | Descripción                                                                                                                                              |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.py`                    | Punto de entrada principal, manejo de sesión, login con formateo de RUT, soporte para gestores de contraseñas y panel de control.                       |
+| `create_db.py`               | Script de siembra inicial: crea roles y usuario administrador por defecto, y carga/actualiza el catálogo de variables desde `variables_ecocardio.xlsx`. |
+| `menu.py`                    | Generador dinámico del menú de navegación lateral.                                                                                                       |
+| `security.py`                | Utilidades de hash y verificación de contraseñas.                                                                                                        |
+| `database/database.py`      | Conexión a PostgreSQL en la nube (pool de conexiones, reciclado y ping automático) e inicialización automática del esquema y roles base.                |
+| `database/models.py`        | Modelos ORM: `Rol`, `Usuario`, `Paciente`, `Estudio`, `Variable` (catálogo de variables) y `Medicion` (mediciones estructuradas por estudio).           |
+| `pages/estudios.py`         | Registro de estudios mediante formulario dinámico basado en el catálogo de variables; genera el informe PDF del estudio.                                |
+| `pages/historial.py`        | Consulta, filtros inteligentes, **importación y extracción automática de datos desde PDFs**, y gráficos de tendencia individuales/globales con Plotly.  |
+| `pages/pacientes.py`        | Gestión y registro demográfico de pacientes.                                                                                                              |
+| `pages/usuarios.py`         | Administración de cuentas de usuarios y roles del sistema (solo Administrador).                                                                          |
+| `pages/exportar.py`         | Exportación de la base de datos completa como matriz estudios × variables (CSV/Excel) para investigación, con eliminación segura de estudios.           |
+| `variables_ecocardio.xlsx`  | Plantilla base con los códigos, categorías, rangos y tipos de las variables ecocardiográficas de la aplicación.                                          |
+| `.streamlit/config.toml`    | Configuración de Streamlit (navegación de la barra lateral deshabilitada; se reemplaza por `menu.py`).                                                  |
 
 ---
 
@@ -210,24 +253,22 @@ flowchart TD
 
 EcoCardioNet utiliza un motor **PostgreSQL** (alojado de forma gratuita en la región de baja latencia de São Paulo a través de **Neon.tech**) para asegurar la persistencia a largo plazo de:
 
-* Información demográfica de pacientes.
-* Estudios ecocardiográficos completos.
-* Historial clínico longitudinal.
-* Credenciales encriptadas de usuarios y asignación de roles.
+- Información demográfica de pacientes (incluye previsión y teléfono fijo).
+- Estudios ecocardiográficos completos, con datos clínicos generales (diagnóstico, procedencia, ficha clínica, antropometría, signos vitales) y el PDF original importado, cuando corresponde.
+- Catálogo de variables ecocardiográficas y sus mediciones estructuradas por estudio (tablas `Variable` y `Medicion`).
+- Historial clínico longitudinal.
+- Credenciales encriptadas de usuarios y asignación de roles.
 
-La base de datos se autogestiona en su primer inicio a través del ORM de SQLAlchemy definido en `database/database.py`.
+La base de datos se autogestiona en su primer inicio a través del ORM de SQLAlchemy definido en `database/database.py`; la siembra de roles, administrador y catálogo de variables se completa ejecutando `create_db.py`.
 
 ---
 
-## 📄 Generación de Reportes
+## 📄 Informes y Análisis de Datos
 
-El sistema permite generar informes clínicos profesionales en formato PDF listos para impresión o distribución digital mediante la biblioteca **ReportLab**, incluyendo:
-
-* Identificación completa del paciente.
-* Datos y antecedentes clínicos relevantes.
-* Mediciones ecocardiográficas estructuradas.
-* Conclusiones e interpretación médica.
-* Firma digitalizada y credenciales del profesional responsable.
+- **Generación de Reportes PDF:** Desde el registro de un estudio (`pages/estudios.py`) se genera un informe clínico profesional con ReportLab, listo para impresión o distribución digital, incluyendo identificación del paciente, mediciones agrupadas por categoría, conclusiones y credenciales del profesional responsable.
+- **Importación de Informes PDF Existentes:** Desde el historial clínico (`pages/historial.py`) es posible cargar un PDF de un informe previo; el sistema extrae automáticamente los datos generales del paciente y las mediciones reconocidas para agilizar la digitalización de registros antiguos.
+- **Tendencias Clínicas Interactivas:** Gráficos de evolución por paciente y por variable, más una vista de tendencia global de una variable a través de todos los pacientes con línea de ajuste LOWESS (Plotly).
+- **Exportación para Investigación:** Matriz de datos estudios × variables descargable en CSV o Excel desde `pages/exportar.py`, con nombres de columnas desambiguados automáticamente cuando dos variables comparten nombre visible.
 
 ---
 
@@ -235,9 +276,10 @@ El sistema permite generar informes clínicos profesionales en formato PDF listo
 
 EcoCardioNet incorpora altos estándares de seguridad para el manejo de datos de salud:
 
-* **Aislamiento de Credenciales:** Uso estricto de `st.secrets` para evitar la exposición de credenciales de bases de datos en repositorios públicos.
-* **Cifrado de Contraseñas:** Encriptación de contraseñas en tránsito y almacenamiento mediante hashes seguros con `Werkzeug`.
-* **Control de Acceso (RBAC):** Restricción de vistas y operaciones basada en roles preestablecidos (*Administrador*, *Cardiólogo*, *Investigador*).
+- **Aislamiento de Credenciales:** Uso estricto de `st.secrets` para evitar la exposición de credenciales de bases de datos en repositorios públicos.
+- **Cifrado de Contraseñas:** Encriptación de contraseñas en tránsito y almacenamiento mediante hashes seguros con `Werkzeug`.
+- **Control de Acceso (RBAC):** Restricción de vistas y operaciones basada en roles preestablecidos (*Administrador*, *Cardiólogo*, *Investigador*); páginas como Usuarios y la eliminación de estudios están restringidas exclusivamente al rol Administrador.
+- **Credenciales por Defecto:** El usuario administrador creado por `create_db.py` debe tener su contraseña cambiada de inmediato en cualquier entorno más allá de pruebas locales.
 
 ---
 
@@ -245,10 +287,11 @@ EcoCardioNet incorpora altos estándares de seguridad para el manejo de datos de
 
 EcoCardioNet está orientado a:
 
-* Cardiólogos clínicos.
-* Ecocardiografistas y tecnólogos médicos.
-* Centros médicos de especialidad y hospitales.
-* Instituciones académicas vinculadas a la formación en cardiología.
+- Cardiólogos clínicos.
+- Ecocardiografistas y tecnólogos médicos.
+- Centros médicos de especialidad y hospitales.
+- Instituciones académicas vinculadas a la formación en cardiología.
+- Investigadores que requieran datasets estructurados de estudios ecocardiográficos.
 
 ---
 
@@ -256,7 +299,7 @@ EcoCardioNet está orientado a:
 
 Proyecto en desarrollo activo.
 
-Las funcionalidades y la estructura interna pueden evolucionar conforme se incorporen nuevas herramientas de análisis estadístico, visualizaciones de tendencias y gestión avanzada de fichas clínicas.
+Las funcionalidades y la estructura interna pueden seguir evolucionando conforme se incorporen nuevas herramientas de análisis estadístico, visualizaciones de tendencias y gestión avanzada de fichas clínicas.
 
 ---
 
