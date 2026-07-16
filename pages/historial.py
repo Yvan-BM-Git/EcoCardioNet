@@ -1,5 +1,8 @@
 # Archivo: pages/historial.py
 import streamlit as st
+import re
+import unicodedata
+import math
 
 # ==================================================
 # CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
@@ -14,144 +17,34 @@ generar_menu()
 # 2. Candado de seguridad: Para que el usuario no pueda acceder a esta página sin iniciar sesión
 if not st.session_state.get("autenticado", False):
     st.warning("🛑 Debes iniciar sesión para ver esta página.")
-    # Botón para redirigir al login
     if st.button("🔑 Ir a Iniciar Sesión"):
-        st.session_state["vista_actual"] = "login" # Nos aseguramos de que app.py muestre la pantalla de login (no la de recuperar)
-        st.switch_page("app.py")                   # Nombre del script principal
+        st.session_state["vista_actual"] = "login"
+        st.switch_page("app.py")
     st.stop()
 
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta, date
-import io
-import re
-import unicodedata
 
 import pdfplumber
 
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Medicion, Variable
+from utils.pacientes_utils import (
+    OPTS_PREV, OPTS_SEXO, DIC_PREFIJOS, LISTA_PREFIJOS,
+    formatear_rut_dinamico, formatear_telefono_dinamico,
+    separar_prefijo_numero, formatear_busqueda_rut,
+)
+from utils.pdf_informe import generar_pdf_desde_historial
 
-# st.set_page_config(layout="wide")
 st.title("📊 Panel de gestión clínica - Ecocardiografía")
 
 # ==================================================
-# CALLBACK DE FORMATEO
+# CALLBACK DE FORMATEO (usa la key propia de esta página)
 # ==================================================
 def formatear_busqueda_callback():
     busqueda_actual = st.session_state.get("busqueda_input", "")
-    if not busqueda_actual:
-        return
-    limpio = busqueda_actual.replace(".", "").replace("-", "").strip().upper()
-    if 7 <= len(limpio) <= 9:
-        cuerpo = limpio[:-1]
-        dv = limpio[-1]
-        if cuerpo.isdigit() and (dv.isdigit() or dv == "K"):
-            cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
-            st.session_state.busqueda_input = f"{cuerpo_formateado}-{dv}"
-
-# ==================================================
-# FUNCIÓN PDF (informe generado por la app)
-# ==================================================
-def generar_pdf_desde_historial(estudio, paciente, mediciones_estudio):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=letter,
-        rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
-    )
-    styles = getSampleStyleSheet()
-    style_h1 = ParagraphStyle('Header1', fontName='Helvetica-Bold', fontSize=14, leading=16,
-                               textColor=colors.HexColor("#1A365D"))
-    style_body_bold = ParagraphStyle('BodyBold', fontName='Helvetica-Bold', fontSize=9, leading=11)
-    style_body = ParagraphStyle('Body', fontName='Helvetica', fontSize=9, leading=11)
-    style_table_header = ParagraphStyle('TableHeader', fontName='Helvetica-Bold', fontSize=9,
-                                        leading=11, textColor=colors.white)
-    story = []
-
-    story.append(Paragraph("<b>EcoCardioNet CARDIAC REPORT</b>", style_h1))
-    story.append(Spacer(1, 12))
-
-    nombre_p = f"{paciente.apellido_paterno} {paciente.apellido_materno or ''} {paciente.nombres}".strip()
-    edad_p = (
-        (datetime.today().date() - paciente.fecha_nacimiento).days // 365
-        if paciente.fecha_nacimiento else "—"
-    )
-    hora_estudio = (
-        estudio.fecha_creacion.strftime('%H:%M')
-        if hasattr(estudio, 'fecha_creacion') and estudio.fecha_creacion else ""
-    )
-    fecha_str = f"{estudio.fecha_estudio.strftime('%d/%m/%Y')} {hora_estudio}".strip()
-
-    data_paciente = [
-        [Paragraph("<b>Paciente:</b>", style_body), Paragraph(nombre_p, style_body),
-         Paragraph("<b>Fecha Estudio:</b>", style_body), Paragraph(fecha_str, style_body)],
-        [Paragraph("<b>ID / RUT:</b>", style_body), Paragraph(paciente.rut, style_body),
-         Paragraph("<b>Edad:</b>", style_body), Paragraph(f"{edad_p} años", style_body)],
-        [Paragraph("<b>Género:</b>", style_body), Paragraph(paciente.sexo or "—", style_body),
-         Paragraph("<b>Médico:</b>", style_body), Paragraph(estudio.medico or "—", style_body)],
-        [Paragraph("<b>Tipo Estudio:</b>", style_body), Paragraph(estudio.tipo_estudio, style_body),
-         Paragraph("<b>Motivo:</b>", style_body), Paragraph(estudio.motivo or "—", style_body)],
-    ]
-    t_paciente = Table(data_paciente, colWidths=[70, 200, 80, 190])
-    t_paciente.setStyle(TableStyle([
-        ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
-        ('BOX',           (0, 0), (-1, -1), 1,   colors.HexColor("#CBD5E0")),
-        ('INNERGRID',     (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING',    (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-    ]))
-    story.append(t_paciente)
-    story.append(Spacer(1, 15))
-
-    story.append(Paragraph("<b>MEDICIONES ECOCARDIOGRÁFICAS</b>", style_body_bold))
-    story.append(Spacer(1, 6))
-
-    if mediciones_estudio:
-        data_mediciones = [[
-            Paragraph("Variable / Parámetro", style_table_header),
-            Paragraph("Valor", style_table_header),
-            Paragraph("Unidad", style_table_header),
-        ]]
-        for m, v in mediciones_estudio:
-            valor_final = str(m.valor_num) if m.valor_num is not None else (m.valor_texto or "")
-            unidad_var = (v.unidad if (v and v.unidad) else "—") or "—"
-            nombre_var = v.nombre if (v and v.nombre) else m.codigo_variable
-            data_mediciones.append([
-                Paragraph(nombre_var, style_body),
-                Paragraph(f"<b>{valor_final}</b>", style_body),
-                Paragraph(unidad_var, style_body),
-            ])
-        t_mediciones = Table(data_mediciones, colWidths=[300, 140, 100])
-        t_mediciones.setStyle(TableStyle([
-            ('BACKGROUND',    (0, 0), (-1, 0),  colors.HexColor("#1A365D")),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
-            ('BOX',           (0, 0), (-1, -1), 1,   colors.HexColor("#1A365D")),
-            ('INNERGRID',     (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
-            ('TOPPADDING',    (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ]))
-        story.append(t_mediciones)
-    else:
-        story.append(Paragraph(
-            "<i>No se encontraron mediciones asociadas a este registro.</i>", style_body
-        ))
-
-    story.append(Spacer(1, 15))
-    texto_obs = estudio.observaciones or "Sin observaciones registradas."
-    story.append(KeepTogether([
-        Paragraph("<b>INFORME CLÍNICO / OBSERVACIONES HISTÓRICAS</b>", style_body_bold),
-        Spacer(1, 4),
-        Paragraph(texto_obs.replace("\n", "<br/>"), style_body),
-    ]))
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
+    st.session_state.busqueda_input = formatear_busqueda_rut(busqueda_actual)
 
 
 # ==================================================
@@ -215,90 +108,152 @@ def _buscar_valor(texto_normalizado, etiquetas):
     return None
 
 
+def _buscar_valor_categorico(texto_normalizado, etiqueta, opciones):
+    """Busca la etiqueta y verifica si alguna de las opciones conocidas aparece cerca."""
+    et_norm = _normalizar(etiqueta)
+    idx = texto_normalizado.find(et_norm)
+    if idx == -1:
+        return None
+    ventana = texto_normalizado[idx: idx + len(et_norm) + 40]
+    for opcion in opciones:
+        if _normalizar(opcion) in ventana:
+            return opcion
+    return None
+
+
 def extraer_mediciones(texto, variables_por_codigo):
     """
-    Intenta extraer valores numéricos del texto de un informe y mapearlos a
-    los códigos de la tabla Variable. Devuelve {codigo: valor_str}.
-    Solo incluye códigos donde se encontró un valor con razonable confianza.
+    Intenta extraer valores del texto de un informe y mapearlos a los códigos
+    de la tabla Variable, respetando el tipo de cada variable (numero, categoria,
+    texto). Devuelve {codigo: valor_str}.
     No pretende ser exhaustivo: el usuario revisa/corrige antes de guardar.
     """
     texto_norm = _normalizar(texto)
     resultados = {}
 
-    # 1. Alias conocidos (más confiables, curados a mano)
+    # 1. Alias conocidos (numéricas, curadas a mano) — más confiables
     for codigo, etiquetas in ALIASES_MEDICIONES.items():
-        if codigo not in variables_por_codigo:
+        var = variables_por_codigo.get(codigo)
+        if not var or var.tipo != "numero":
             continue
         valor = _buscar_valor(texto_norm, etiquetas)
         if valor:
             resultados[codigo] = valor
 
-    # 2. Fallback genérico: usar el nombre tal cual está en la BD de Variable
+    # 2. Fallback genérico por nombre de Variable, respetando el tipo
     for codigo, var in variables_por_codigo.items():
         if codigo in resultados:
-            continue
-        if var.tipo != "numero":
             continue
         nombre_norm = _normalizar(var.nombre or "")
         if not nombre_norm or len(nombre_norm) < 3:
             continue
-        patron = re.escape(nombre_norm) + r'[^0-9\-]{0,15}' + _NUM
-        m = re.search(patron, texto_norm)
-        if m:
-            resultados[codigo] = m.group(1).replace(",", ".")
+
+        if var.tipo == "numero":
+            patron = re.escape(nombre_norm) + r'[^0-9\-]{0,15}' + _NUM
+            m = re.search(patron, texto_norm)
+            if m:
+                resultados[codigo] = m.group(1).replace(",", ".")
+
+        elif var.tipo == "categoria":
+            opciones = [
+                o.strip() for o in (getattr(var, "opciones", "") or "").split(";")
+                if o.strip()
+            ]
+            if opciones:
+                valor = _buscar_valor_categorico(texto_norm, nombre_norm, opciones)
+                if valor:
+                    resultados[codigo] = valor
+
+        # "texto" se deja fuera de la extracción automática: el riesgo de falsos
+        # positivos es alto y no aporta valor real revisarlo/corregirlo a ciegas.
 
     return resultados
 
-
 def extraer_nombre_paciente(texto):
-    """Intenta extraer el nombre completo del paciente en distintos formatos de informe."""
-    # Formato "Paciente : NOMBRE APELLIDOS" (todo en mayúsculas, común en clínicas chilenas)
-    m = re.search(r'[Pp]aciente\s*:\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{4,60})', texto)
-    if m:
-        nombre = re.sub(r'\s+', ' ', m.group(1)).strip()
-        # Cortar si se coló texto de otra etiqueta cercana
-        nombre = re.split(r'\d|R\.U\.T|EDAD', nombre)[0].strip()
-        if len(nombre.split()) >= 2:
-            return nombre.title()
+    """
+    Extrae el nombre completo del paciente desde el texto del informe.
 
-    # Formato "Name APELLIDOS, NOMBRES ... Patient Id"
-    m = re.search(r'Name\s+([A-ZÁÉÍÓÚÑ,\s]{4,60}?)\s*Patient Id', texto, re.DOTALL)
-    if m:
-        nombre = re.sub(r'\s+', ' ', m.group(1)).strip().replace(",", "")
-        if len(nombre.split()) >= 2:
-            return nombre.title()
+    Soporta dos formatos:
+    - "Paciente : NOMBRES APELLIDO_PATERNO APELLIDO_MATERNO" (formato chileno habitual,
+      sin coma).
+    - "Name APELLIDO_PATERNO APELLIDO_MATERNO, NOMBRES" (equipos GE Healthcare / informes
+      en inglés, con coma). En este caso las palabras ANTES de la coma son los apellidos
+      (paterno y materno) y las palabras DESPUÉS de la coma son los nombres. Se descartan
+      palabras de relleno como "Image" que a veces quedan intercaladas por el layout del PDF.
+    """
+    # Normalizar espacios y eliminar caracteres no imprimibles (la coma se conserva:
+    # es parte del rango ASCII imprimible \x20-\x7E)
+    texto = re.sub(r'\s+', ' ', texto)
+    texto = re.sub(r'[^\x20-\x7E\u00C0-\u00FF]', '', texto)
 
-    return None
+    # --- Caso con coma: "APELLIDOS, NOMBRES" ---
+    patron_coma = r'(?i)(?:paciente|nombre|patient|name)\s*:?\s*([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)\s*,'
+    m_coma = re.search(patron_coma, texto)
+    if m_coma:
+        apellidos = [p for p in re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', m_coma.group(1)) if len(p) >= 2]
 
+        # Texto restante después de la coma, hasta el próximo separador de campo conocido
+        resto = texto[m_coma.end():]
+        m_fin = re.search(r'(?i)(?:r\.?u\.?t|rut|edad|años|patient\s*id)', resto)
+        resto = resto[:m_fin.start()] if m_fin else resto
+
+        # Descartar palabras de relleno tipo "Image 1", "Image 2" (ruido de layout del PDF)
+        resto_limpio = re.sub(r'(?i)\bimage\s*\d*\b', ' ', resto)
+        nombres = [p for p in re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', resto_limpio) if len(p) >= 2]
+
+        if not nombres or not apellidos:
+            return None
+
+        ap_paterno = apellidos[0]
+        ap_materno = apellidos[1] if len(apellidos) >= 2 else ""
+
+        # Se reordena a formato chileno (Nombres Apellido_Paterno Apellido_Materno)
+        # para mantener compatibilidad con dividir_nombre_completo().
+        partes_final = nombres[:2] + [p for p in (ap_paterno, ap_materno) if p]
+        return " ".join(partes_final).title()
+
+    # --- Caso sin coma: heurística chilena habitual (Nombres Apellido_Paterno Apellido_Materno) ---
+    patron = r'(?i)(?:paciente|nombre|patient|name)\s*:?\s*([^:]+?)(?=\s*(?:r\.?u\.?t|rut|edad|años|\d))'
+    m = re.search(patron, texto)
+    if not m:
+        return None
+
+    raw = m.group(1).strip()
+
+    # Extraer todas las palabras alfabéticas (ignora puntos, comas, etc.)
+    palabras = re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', raw)
+
+    # Filtrar palabras de una sola letra (como la 'R' suelta)
+    palabras_limpias = [p for p in palabras if len(p) >= 2]
+
+    if len(palabras_limpias) >= 3:
+        nombre_final = " ".join(palabras_limpias[:3])  # Nombres + dos apellidos
+    elif len(palabras_limpias) == 2:
+        nombre_final = " ".join(palabras_limpias[:2])  # Solo nombres + paterno
+    else:
+        return None
+
+    return nombre_final.title()
 
 def dividir_nombre_completo(nombre_completo):
     """
-    Heurística simple para separar un nombre completo detectado en
-    nombres / apellido paterno / apellido materno. Es solo un punto de
-    partida: el usuario siempre puede corregirlo en el formulario.
+    Separa el nombre completo en:
+    - Nombres
+    - Apellido paterno
+    - Apellido materno
+    Asume el formato chileno: [Nombres] [Apellido Paterno] [Apellido Materno]
     """
     if not nombre_completo:
         return "", "", ""
     partes = nombre_completo.split()
-    if len(partes) >= 4:
-        apellido_paterno = partes[0]
-        apellido_materno = partes[1]
-        nombres = " ".join(partes[2:])
-    elif len(partes) == 3:
-        apellido_paterno = partes[0]
-        apellido_materno = partes[1]
-        nombres = partes[2]
+    if len(partes) == 1:
+        return partes[0], "", ""
     elif len(partes) == 2:
-        apellido_paterno = partes[0]
-        apellido_materno = ""
-        nombres = partes[1]
+        return partes[0], partes[1], ""
     else:
-        apellido_paterno = nombre_completo
-        apellido_materno = ""
-        nombres = ""
-    return nombres, apellido_paterno, apellido_materno
-
-
+        # El último es materno, el penúltimo paterno, el resto nombres
+        return " ".join(partes[:-2]), partes[-2], partes[-1]
+    
 def extraer_datos_generales(texto):
     """Intenta detectar RUT, nombre, fecha, peso, talla, FC, ritmo, sexo y médico del informe."""
     datos = {}
@@ -350,6 +305,27 @@ def extraer_datos_generales(texto):
     return datos
 
 
+def calcular_asc_imc_import():
+    """Calcula ASC (fórmula de Mosteller) e IMC a partir de peso/talla del formulario de importación."""
+    try:
+        peso_str = st.session_state.get("peso_import_input_g", "").replace(",", ".")
+        talla_str = st.session_state.get("talla_import_input_g", "").replace(",", ".")
+        peso_f = float(peso_str)
+        talla_f = float(talla_str)
+        if peso_f > 0 and talla_f > 0:
+            asc = math.sqrt((peso_f * talla_f) / 3600)
+            talla_m = talla_f / 100
+            imc = peso_f / (talla_m ** 2)
+            st.session_state["asc_import_val_g"] = f"{asc:.2f}"
+            st.session_state["imc_import_val_g"] = f"{imc:.2f}"
+        else:
+            st.session_state["asc_import_val_g"] = ""
+            st.session_state["imc_import_val_g"] = ""
+    except (ValueError, ZeroDivisionError):
+        st.session_state["asc_import_val_g"] = ""
+        st.session_state["imc_import_val_g"] = ""
+
+
 session = SessionLocal()
 
 try:
@@ -366,6 +342,7 @@ try:
 
     fecha_min = session.query(Estudio.fecha_estudio).order_by(Estudio.fecha_estudio).first()
     fecha_max = session.query(Estudio.fecha_estudio).order_by(Estudio.fecha_estudio.desc()).first()
+
     if fecha_min and fecha_max:
         default_start = fecha_min[0]
         default_end = fecha_max[0]
@@ -373,16 +350,61 @@ try:
         default_start = datetime.today() - timedelta(days=365)
         default_end = datetime.today()
 
-    fecha_desde = st.sidebar.date_input("Fecha desde", value=default_start)
-    fecha_hasta = st.sidebar.date_input("Fecha hasta", value=default_end)
+    col1, col2 = st.sidebar.columns(2)
+
+    with col1:
+        fecha_desde = st.date_input("Desde", value=default_start)
+
+    with col2:
+        fecha_hasta = st.date_input("Hasta", value=default_end)
 
     tipos_estudio = session.query(Estudio.tipo_estudio).distinct().all()
     tipos_estudio = [t[0] for t in tipos_estudio if t[0]]
     tipo_seleccionado = st.sidebar.multiselect("Tipo de estudio", tipos_estudio, default=tipos_estudio)
 
-    medicos = session.query(Estudio.medico).distinct().all()
-    medicos = [m[0] for m in medicos if m[0]]
-    medico_seleccionado = st.sidebar.multiselect("Médico responsable", medicos, default=medicos)
+    st.sidebar.subheader("👨‍⚕️ Médico responsable")
+
+    medicos_db = session.query(Estudio.medico).distinct().all()
+    medicos_db = [m[0] for m in medicos_db if m[0]]
+
+    def normalizar_medico(nombre):
+        nombre = nombre.strip()
+        nombre = re.sub(r"\s+", " ", nombre)
+        nombre = re.sub(
+            r"\b(Cardiologo|Cardiólogo|Cardiology)\b",
+            "",
+            nombre,
+            flags=re.IGNORECASE
+        )
+        nombre = nombre.strip()
+        clave = unicodedata.normalize("NFKD", nombre)
+        clave = "".join(c for c in clave if not unicodedata.combining(c))
+        clave = clave.lower()
+        return clave, nombre
+
+    medicos_dict = {}
+    for nombre in medicos_db:
+        clave, limpio = normalizar_medico(nombre)
+        if clave not in medicos_dict:
+            medicos_dict[clave] = limpio
+        elif len(limpio) < len(medicos_dict[clave]):
+            medicos_dict[clave] = limpio
+
+    medicos = sorted(medicos_dict.values())
+
+    buscar = st.sidebar.text_input("Buscar médico", placeholder="Apellido...")
+
+    if buscar:
+        medicos_filtrados = [m for m in medicos if buscar.lower() in m.lower()]
+    else:
+        medicos_filtrados = medicos
+
+    medico_seleccionado = st.sidebar.multiselect(
+        "Seleccionar",
+        options=medicos_filtrados,
+        default=medicos_filtrados,
+        label_visibility="collapsed"
+    )
 
     # ==================================================
     # OBTENER SOLO VARIABLES DEL PACIENTE SELECCIONADO
@@ -399,7 +421,7 @@ try:
         query_vars = query_vars.filter(Estudio.paciente_rut == rut_paciente_actual)
 
     variables_con_mediciones = query_vars.distinct().order_by(Variable.nombre).all()
-    
+
     if not variables_con_mediciones:
         if rut_paciente_actual:
             st.sidebar.info("💡 El paciente seleccionado aún no tiene mediciones guardadas.")
@@ -443,22 +465,32 @@ try:
     st.divider()
     with st.expander("📎 Importar Informe en PDF (paciente nuevo o existente)", expanded=False):
         st.caption(
-            "Subí el PDF del informe. El sistema intenta detectar el RUT, nombre y "
-            "algunos valores numéricos automáticamente. Si el paciente ya existe en la "
+            "Al subir el PDF del informe, el sistema intenta detectar el RUT, nombre y "
+            "algunos valores automáticamente. Si el paciente ya existe en la "
             "base de datos se usa su ficha; si no existe, se puede registrar en el momento. "
-            "**Siempre revisá y corregí** los datos antes de confirmar."
+            "**Revisar y corregir** los datos antes de confirmar."
         )
         archivo_pdf_global = st.file_uploader(
             "Selecciona el archivo PDF", type=["pdf"], key="uploader_pdf_global"
         )
 
         if archivo_pdf_global is not None:
-            cache_key_g = f"extraccion_pdf_global_{archivo_pdf_global.name}_{archivo_pdf_global.size}"
+            # --- Generar un sufijo único para este archivo ---
+            pdf_suffix = re.sub(r'[^a-zA-Z0-9_]', '_', f"{archivo_pdf_global.name}_{archivo_pdf_global.size}")
+            cache_key_g = f"extraccion_pdf_global_{pdf_suffix}"
+
+            # --- Extraer SOLO la primera vez que se ve este archivo en la sesión ---
+            archivo_pdf_global.seek(0)
+            texto_extraido_g = extraer_texto_pdf(archivo_pdf_global)
+
+            # === DEPURACIÓN ===
+            st.text_area("🔍 Texto crudo extraído del PDF (primeros 1000 caracteres)", texto_extraido_g)
 
             if cache_key_g not in st.session_state:
                 with st.spinner("Extrayendo texto y datos del PDF..."):
-                    archivo_pdf_global.seek(0)
-                    texto_extraido_g = extraer_texto_pdf(archivo_pdf_global)
+                    nombre_crudo = extraer_nombre_paciente(texto_extraido_g)
+                    st.caption(f"🔎 Nombre crudo detectado: **{nombre_crudo}**")
+
                     mediciones_detectadas_g = extraer_mediciones(texto_extraido_g, variables_por_codigo_global)
                     datos_generales_g = extraer_datos_generales(texto_extraido_g)
                     archivo_pdf_global.seek(0)
@@ -470,6 +502,18 @@ try:
                         "pdf_bytes": pdf_bytes_g,
                         "pdf_nombre": archivo_pdf_global.name,
                     }
+
+                    # Reset de tablas manuales (solo al procesar un PDF nuevo)
+                    st.session_state["manual_numericas"] = pd.DataFrame(columns=["Código", "Valor"])
+                    st.session_state["manual_categoricas"] = pd.DataFrame(columns=["Código", "Valor"])
+                    st.session_state["manual_texto"] = pd.DataFrame(columns=["Código", "Valor"])
+
+                    # Limpiar editores antiguos de otros PDFs previamente cargados en esta sesión
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("editor_") and not k.endswith(pdf_suffix):
+                            st.session_state.pop(k, None)
+                    st.session_state.pop("cod_categorica_actual", None)
+                    st.session_state.pop("valor_categorica_actual", None)
 
             datos_cache_g = st.session_state[cache_key_g]
             generales_g = datos_cache_g["generales"]
@@ -492,7 +536,6 @@ try:
                     Paciente.rut == rut_normalizado_busqueda
                 ).first()
                 if not paciente_encontrado:
-                    # Comparación tolerante a puntos/guión por si el formato no calza exacto
                     limpio_buscado = re.sub(r'[.\-]', '', rut_normalizado_busqueda)
                     for c in session.query(Paciente).all():
                         if re.sub(r'[.\-]', '', c.rut.upper()) == limpio_buscado:
@@ -516,6 +559,7 @@ try:
                     st.info("💡 No se detectó un RUT válido en el PDF. Ingresá los datos del paciente manualmente para registrarlo.")
 
                 nombre_completo_detectado = generales_g.get("nombre_completo", "")
+                st.caption(f"Nombre completo detectado: **{nombre_completo_detectado}**")
                 nombres_g, ap_pat_g, ap_mat_g = dividir_nombre_completo(nombre_completo_detectado)
 
                 if nombre_completo_detectado:
@@ -547,10 +591,65 @@ try:
                         key="fn_nuevo_import_global"
                     )
                 with cn5:
-                    opts_sexo_g = ["", "Masculino", "Femenino"]
                     sexo_detectado_g = generales_g.get("sexo", "")
-                    idx_sexo_g = opts_sexo_g.index(sexo_detectado_g) if sexo_detectado_g in opts_sexo_g else 0
-                    sexo_nuevo_g = st.selectbox("Sexo", opts_sexo_g, index=idx_sexo_g, key="sexo_nuevo_import_global")
+                    idx_sexo_g = OPTS_SEXO.index(sexo_detectado_g) if sexo_detectado_g in OPTS_SEXO else 0
+                    sexo_nuevo_g = st.selectbox("Sexo", OPTS_SEXO, index=idx_sexo_g, key="sexo_nuevo_import_global")
+
+                # ------------------------------------------------
+                # Campos adicionales (no vienen en el PDF de eco):
+                # previsión, teléfono fijo, celular, email
+                # ------------------------------------------------
+                cn6, cn7 = st.columns(2)
+                with cn6:
+                    prevision_nuevo_g = st.selectbox(
+                        "Previsión", OPTS_PREV, index=0, key="prevision_nuevo_import_global"
+                    )
+                with cn7:
+                    email_nuevo_g = st.text_input(
+                        "Email", value="", placeholder="ejemplo@correo.com",
+                        key="email_nuevo_import_global"
+                    )
+
+                cn8, cn9 = st.columns(2)
+                with cn8:
+                    cp1, cn1_ = st.columns([1, 2])
+                    with cp1:
+                        idx_p_fono_g = LISTA_PREFIJOS.index("+56") if "+56" in LISTA_PREFIJOS else LISTA_PREFIJOS.index("OTRO")
+                        sel_pref_fono_g = st.selectbox(
+                            "Cód.", options=LISTA_PREFIJOS, index=idx_p_fono_g,
+                            format_func=lambda x: DIC_PREFIJOS[x], key="p_fono_import_global"
+                        )
+                        if sel_pref_fono_g == "OTRO":
+                            prefijo_fono_g = st.text_input("Escriba Cód.", value="+", key="m_fono_import_global")
+                        else:
+                            prefijo_fono_g = sel_pref_fono_g
+                    with cn1_:
+                        fono_base_g = st.text_input(
+                            "Fono fijo", value="", placeholder="22 123 4567",
+                            max_chars=11, key="fono_base_import_global",
+                            on_change=formatear_telefono_dinamico, args=("fono_base_import_global",)
+                        )
+                    fono_fijo_final_g = f"{prefijo_fono_g} {fono_base_g.strip()}" if fono_base_g.strip() else ""
+
+                with cn9:
+                    cp2, cn2_ = st.columns([1, 2])
+                    with cp2:
+                        idx_p_cel_g = LISTA_PREFIJOS.index("+56") if "+56" in LISTA_PREFIJOS else LISTA_PREFIJOS.index("OTRO")
+                        sel_pref_cel_g = st.selectbox(
+                            "Cód.", options=LISTA_PREFIJOS, index=idx_p_cel_g,
+                            format_func=lambda x: DIC_PREFIJOS[x], key="p_cel_import_global"
+                        )
+                        if sel_pref_cel_g == "OTRO":
+                            prefijo_cel_g = st.text_input("Escriba Cód.", value="+", key="m_cel_import_global")
+                        else:
+                            prefijo_cel_g = sel_pref_cel_g
+                    with cn2_:
+                        celular_base_g = st.text_input(
+                            "Celular", value="", placeholder="987 654 321",
+                            max_chars=11, key="celular_base_import_global",
+                            on_change=formatear_telefono_dinamico, args=("celular_base_import_global",)
+                        )
+                    celular_final_g = f"{prefijo_cel_g} {celular_base_g.strip()}" if celular_base_g.strip() else ""
 
                 datos_paciente_nuevo = {
                     "rut": rut_editable.strip(),
@@ -559,6 +658,10 @@ try:
                     "apellido_materno": ap_materno_nuevo_g.strip(),
                     "fecha_nacimiento": fecha_nac_nuevo_g,
                     "sexo": sexo_nuevo_g if sexo_nuevo_g else None,
+                    "prevision": prevision_nuevo_g if prevision_nuevo_g else None,
+                    "fono_fijo": fono_fijo_final_g,
+                    "celular": celular_final_g,
+                    "email": email_nuevo_g.strip(),
                 }
 
             paciente_listo = (paciente_encontrado and usar_paciente_existente) or (
@@ -579,8 +682,40 @@ try:
                 else:
                     st.warning("⚠️ No se detectó ningún valor automáticamente. Podés cargarlos manualmente en la tabla.")
 
-                cg1, cg2, cg3 = st.columns(3)
+                # Inicialización de los valores calculados (ASC/IMC) antes de crear los widgets
+                st.session_state.setdefault("asc_import_val_g", "")
+                st.session_state.setdefault("imc_import_val_g", "")
+
+                cg1, cg2, cg3, cg4 = st.columns([3, 3, 1.5, 1.5])
                 with cg1:
+                    # "medicos" ya fue calculado más arriba (lista limpia y deduplicada desde la BD)
+                    opciones_medico_g = medicos + ["Otro..."]
+                    medico_sugerido_g = generales_g.get("medico_sugerido", "")
+                    index_medico_g = (
+                        opciones_medico_g.index(medico_sugerido_g)
+                        if medico_sugerido_g in opciones_medico_g
+                        else len(opciones_medico_g) - 1  # "Otro..."
+                    )
+                    medico_seleccionado_g = st.selectbox(
+                        "Médico responsable", opciones_medico_g,
+                        index=index_medico_g, key="medico_select_import_global"
+                    )
+                    if medico_seleccionado_g == "Otro...":
+                        medico_import_g = st.text_input(
+                            "Especifique el médico",
+                            value=medico_sugerido_g if medico_sugerido_g not in opciones_medico_g else "",
+                            placeholder="Nombre del médico",
+                            key="medico_otro_import_global",
+                        )
+                    else:
+                        medico_import_g = medico_seleccionado_g
+                with cg2:
+                    tipo_import_g = st.selectbox(
+                        "Tipo de estudio",
+                        ["Ecocardiograma Transtorácico", "Ecocardiograma Transesofágico", "Ecocardiograma de Estrés", "Ecocardiograma 3D"],
+                        key="tipo_import_global"
+                    )
+                with cg3:
                     fecha_detectada_g = date.today()
                     if generales_g.get("fecha_texto"):
                         try:
@@ -595,68 +730,298 @@ try:
                         "Fecha del estudio", value=fecha_detectada_g, format="DD/MM/YYYY",
                         key="fecha_import_global"
                     )
-                with cg2:
-                    tipo_import_g = st.selectbox(
-                        "Tipo de estudio",
-                        ["Ecocardiograma Transtorácico", "Ecocardiograma Transesofágico", "Ecocardiograma de Estrés", "Ecocardiograma 3D"],
-                        key="tipo_import_global"
+                with cg4:
+                    ficha_clinica_import_g = st.text_input("Ficha Clínica", key="ficha_clinica_import_global")
+
+                cg5, cg6, cg7 = st.columns(3)
+                with cg5:
+                    opciones_patologia_g = [
+                        "Sin antecedentes",
+                        "Hipertensión arterial (HTA)",
+                        "Diabetes Mellitus tipo 2",
+                        "Dislipidemia",
+                        "Cardiopatía coronaria",
+                        "Fibrilación auricular",
+                        "Insuficiencia cardíaca",
+                        "Enfermedad renal crónica",
+                        "EPOC",
+                        "Obesidad",
+                        "Hipotiroidismo",
+                        "Tabaquismo",
+                        "Valvulopatía",
+                        "Cardiopatía congénita",
+                        "Otro..."
+                    ]
+                    patologias_seleccionadas_g = st.multiselect(
+                        "Patología de base",
+                        opciones_patologia_g,
+                        placeholder="Selecciona una o más patologías",
+                        key="patologia_import_global",
                     )
-                with cg3:
-                    medico_import_g = st.text_input(
-                        "Médico responsable",
-                        value=generales_g.get("medico_sugerido", ""),
-                        key="medico_import_global"
+                    otra_patologia_g = ""
+                    if "Otro..." in patologias_seleccionadas_g:
+                        otra_patologia_g = st.text_input(
+                            "Especifique la(s) otra(s) patología(s)",
+                            placeholder="Ej: Enfermedad de Chagas, etc.",
+                            key="otra_patologia_import_global",
+                        )
+                    lista_patologias_final_g = [p for p in patologias_seleccionadas_g if p != "Otro..."]
+                    if otra_patologia_g.strip():
+                        lista_patologias_final_g.append(otra_patologia_g.strip())
+                    diagnostico_import_g = ", ".join(lista_patologias_final_g)
+                with cg6:
+                    procedencia_import_g = st.text_input(
+                        "Servicio de origen", placeholder="Ej: HRT, CESFAM, Dr. Eric Fuentes, etc.",
+                        key="procedencia_import_global",
+                    )
+                with cg7:
+                    destino_import_g = st.text_input(
+                        "Servicio de destino", placeholder="Ej: HRT, CESFAM, etc.",
+                        key="destino_import_global",
+                    )
+
+                cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8 = st.columns([1, 1, 1, 1, 1, 1, 2, 1])
+                with cv1:
+                    peso_import_g = st.text_input(
+                        "PESO (kg)", value=generales_g.get("peso", ""),
+                        key="peso_import_input_g", on_change=calcular_asc_imc_import,
+                    )
+                with cv2:
+                    talla_import_g = st.text_input(
+                        "TALLA (cm)", value=generales_g.get("talla", ""),
+                        key="talla_import_input_g", on_change=calcular_asc_imc_import,
+                    )
+                with cv3:
+                    asc_import_g = st.text_input("ASC", value=st.session_state.asc_import_val_g, disabled=True)
+                with cv4:
+                    imc_import_g = st.text_input("IMC", value=st.session_state.imc_import_val_g, disabled=True)
+                with cv5:
+                    pas_import_g = st.text_input("PAS", key="pas_import_global")
+                with cv6:
+                    pad_import_g = st.text_input("PAD", key="pad_import_global")
+                with cv7:
+                    opciones_ritmo_g = ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal",
+                                        "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular",
+                                        "Marcapaso", "Otro"]
+                    ritmo_detectado_g = generales_g.get("ritmo", "")
+                    idx_ritmo_g = opciones_ritmo_g.index(ritmo_detectado_g) if ritmo_detectado_g in opciones_ritmo_g else 0
+                    ritmo_import_g = st.selectbox("Ritmo", opciones_ritmo_g, index=idx_ritmo_g, key="ritmo_import_global")
+                with cv8:
+                    fcia_import_g = st.text_input(
+                        "FCia", value=generales_g.get("fcia", ""), key="fcia_import_global",
                     )
 
                 st.markdown("##### 3️⃣ Mediciones detectadas (editable)")
-                filas_tabla_g = []
-                for codigo, var in variables_por_codigo_global.items():
-                    if var.tipo != "numero":
-                        continue
-                    if codigo not in datos_cache_g["mediciones"]:
-                        continue
-                    filas_tabla_g.append({
-                        "Código": codigo,
-                        "Nombre": var.nombre,
-                        "Valor detectado": datos_cache_g["mediciones"][codigo],
-                        "Unidad": var.unidad or "",
-                    })
 
-                if filas_tabla_g:
-                    df_tabla_import_g = pd.DataFrame(filas_tabla_g)
-                    df_editado_import_g = st.data_editor(
-                        df_tabla_import_g,
-                        column_config={
-                            "Código": st.column_config.TextColumn(disabled=True),
-                            "Nombre": st.column_config.TextColumn(disabled=True),
-                            "Unidad": st.column_config.TextColumn(disabled=True),
-                        },
+                codigos_detectados = list(datos_cache_g["mediciones"].keys())
+
+                df_editado_import_g = pd.DataFrame(columns=["N°", "Código", "Nombre", "Valor detectado", "Unidad"])
+
+                if not codigos_detectados:
+                    st.info("No se detectó ningún valor automáticamente. El informe se guardará solo como PDF adjunto, salvo que agregues valores manualmente abajo.")
+                else:
+                    detectadas_por_tipo = {"numero": [], "categoria": [], "texto": []}
+                    for codigo in codigos_detectados:
+                        var = variables_por_codigo_global.get(codigo)
+                        if not var:
+                            continue
+                        detectadas_por_tipo.setdefault(var.tipo, []).append(codigo)
+
+                    def _fila_detectada(codigo, var, valor_bruto):
+                        num_fila = codigos_detectados.index(codigo) + 1
+                        return {
+                            "N°": num_fila,
+                            "Código": codigo,
+                            "Nombre": var.nombre,
+                            "Valor detectado": valor_bruto,
+                            "Unidad": var.unidad or "",
+                        }
+
+                    piezas_df_detectadas = []
+
+                    codigos_num_det = detectadas_por_tipo.get("numero", [])
+                    if codigos_num_det:
+                        st.caption("Numéricas")
+                        filas_num_det = [
+                            _fila_detectada(c, variables_por_codigo_global[c], float(datos_cache_g["mediciones"][c]))
+                            for c in codigos_num_det
+                        ]
+
+                        df_num_det = st.data_editor(
+                            pd.DataFrame(filas_num_det),
+                            column_config={
+                                "N°": st.column_config.NumberColumn("N°", disabled=True),
+                                "Código": st.column_config.TextColumn(disabled=True),
+                                "Nombre": st.column_config.TextColumn(disabled=True),
+                                "Unidad": st.column_config.TextColumn(disabled=True),
+                                "Valor detectado": st.column_config.NumberColumn(format="%.4g"),
+                            },
+                            hide_index=True,
+                            use_container_width=True,
+                            key=f"editor_import_global_numericas_{pdf_suffix}",
+                        )
+                        piezas_df_detectadas.append(df_num_det)
+
+                    codigos_cat_det = detectadas_por_tipo.get("categoria", [])
+                    if codigos_cat_det:
+                        st.caption("Categóricas")
+                        filas_cat_det = []
+                        opciones_por_codigo_det = {}
+                        for c in codigos_cat_det:
+                            var = variables_por_codigo_global[c]
+                            opciones_por_codigo_det[c] = [
+                                o.strip() for o in (getattr(var, "opciones", "") or "").split(";") if o.strip()
+                            ]
+                            filas_cat_det.append(_fila_detectada(c, var, datos_cache_g["mediciones"][c]))
+
+                        opciones_unicas_det = {tuple(v) for v in opciones_por_codigo_det.values()}
+                        if len(opciones_unicas_det) == 1 and codigos_cat_det:
+                            opciones_comunes_det = opciones_por_codigo_det[codigos_cat_det[0]]
+                            valor_col_config_det = st.column_config.SelectboxColumn(options=opciones_comunes_det)
+                        else:
+                            valor_col_config_det = st.column_config.TextColumn()
+
+                        df_cat_det = st.data_editor(
+                            pd.DataFrame(filas_cat_det),
+                            column_config={
+                                "N°": st.column_config.NumberColumn("N°", disabled=True),
+                                "Código": st.column_config.TextColumn(disabled=True),
+                                "Nombre": st.column_config.TextColumn(disabled=True),
+                                "Unidad": st.column_config.TextColumn(disabled=True),
+                                "Valor detectado": valor_col_config_det,
+                            },
+                            hide_index=True,
+                            use_container_width=True,
+                            key=f"editor_import_global_categoricas_{pdf_suffix}",
+                        )
+                        piezas_df_detectadas.append(df_cat_det)
+
+                    if piezas_df_detectadas:
+                        df_editado_import_g = pd.concat(piezas_df_detectadas, ignore_index=True)
+
+                st.markdown("##### Agregar variables manualmente (opcional)")
+
+                codigos_ya_detectados = set(datos_cache_g["mediciones"].keys())
+
+                vars_numericas = {c: v for c, v in variables_por_codigo_global.items() if v.tipo == "numero" and c not in codigos_ya_detectados}
+                vars_categoricas = {c: v for c, v in variables_por_codigo_global.items() if v.tipo == "categoria" and c not in codigos_ya_detectados}
+                vars_texto = {c: v for c, v in variables_por_codigo_global.items() if v.tipo == "texto" and c not in codigos_ya_detectados}
+
+                def _inicializar_df_manual(key, columnas):
+                    if key not in st.session_state:
+                        st.session_state[key] = pd.DataFrame(columns=columnas)
+
+                filas_nuevas = []
+
+                if vars_numericas:
+                    st.caption("Numéricas")
+                    _inicializar_df_manual("manual_numericas", ["Código", "Valor"])
+                    df_num = st.data_editor(
+                        st.session_state["manual_numericas"],
+                        num_rows="dynamic",
                         hide_index=True,
                         use_container_width=True,
-                        key="editor_import_global",
+                        column_config={
+                            "Código": st.column_config.SelectboxColumn(
+                                "Código", options=sorted(vars_numericas.keys()), required=True,
+                            ),
+                            "Valor": st.column_config.NumberColumn(
+                                "Valor", required=True, format="%.4g",
+                            ),
+                        },
+                        key=f"editor_manual_numericas_{pdf_suffix}",
                     )
-                else:
-                    st.info("No se detectaron variables numéricas automáticamente. El informe se guardará solo como PDF adjunto, salvo que agregues valores manualmente abajo.")
-                    df_editado_import_g = pd.DataFrame(columns=["Código", "Nombre", "Valor detectado", "Unidad"])
+                    st.session_state["manual_numericas"] = df_num.copy()
+                    for _, fila in df_num.iterrows():
+                        codigo, valor = fila["Código"], fila["Valor"]
+                        if pd.notna(codigo) and codigo != "" and pd.notna(valor):
+                            var = vars_numericas[codigo]
+                            filas_nuevas.append({
+                                "Código": codigo, "Nombre": var.nombre,
+                                "Valor detectado": valor, "Unidad": var.unidad or ""
+                            })
 
-                st.markdown("##### Agregar variable manualmente (opcional)")
-                cm1, cm2 = st.columns([2, 1])
-                with cm1:
-                    cod_manual_g = st.selectbox(
-                        "Variable a agregar",
-                        options=[""] + sorted([c for c, v in variables_por_codigo_global.items() if v.tipo == "numero"]),
-                        key="cod_manual_import_global"
+
+                if vars_categoricas:
+                    st.caption("Categóricas")
+                    _inicializar_df_manual("manual_categoricas", ["Código", "Valor"])
+
+                    col_cat_cod, col_cat_valor = st.columns(2)
+                    with col_cat_cod:
+                        codigo_cat_actual = st.selectbox(
+                            "Variable categórica a agregar",
+                            options=[""] + sorted(vars_categoricas.keys()),
+                            key="cod_categorica_actual",
+                        )
+
+                    opciones_cat = []
+                    if codigo_cat_actual:
+                        opciones_cat = [
+                            o.strip() for o in (getattr(vars_categoricas[codigo_cat_actual], "opciones", "") or "").split(";")
+                            if o.strip()
+                        ]
+
+                    if codigo_cat_actual and not opciones_cat:
+                        st.warning(f"La variable '{codigo_cat_actual}' no tiene opciones configuradas en la base de datos.")
+                    elif codigo_cat_actual:
+                        with col_cat_valor:
+                            valor_cat_actual = st.selectbox("Valor", options=opciones_cat, key="valor_categorica_actual")
+                        if st.button("➕ Agregar fila categórica", key="btn_add_categorica"):
+                            nueva = pd.DataFrame([{"Código": codigo_cat_actual, "Valor": valor_cat_actual}])
+                            st.session_state["manual_categoricas"] = pd.concat(
+                                [st.session_state["manual_categoricas"], nueva], ignore_index=True
+                            )
+                            st.rerun()
+
+                    df_cat = st.data_editor(
+                        st.session_state["manual_categoricas"],
+                        num_rows="dynamic",
+                        hide_index=True,
+                        use_container_width=True,
+                        disabled=["Código", "Valor"],
+                        key=f"editor_manual_categoricas_{pdf_suffix}",
                     )
-                with cm2:
-                    valor_manual_g = st.text_input("Valor", key="valor_manual_import_global")
+                    st.session_state["manual_categoricas"] = df_cat.copy()
+                    for _, fila in df_cat.iterrows():
+                        codigo, valor = fila["Código"], fila["Valor"]
+                        if pd.notna(codigo) and codigo != "" and pd.notna(valor) and str(valor).strip():
+                            var = vars_categoricas[codigo]
+                            filas_nuevas.append({
+                                "Código": codigo, "Nombre": var.nombre,
+                                "Valor detectado": valor, "Unidad": var.unidad or ""
+                            })
 
-                if cod_manual_g and valor_manual_g:
-                    var_manual_g = variables_por_codigo_global[cod_manual_g]
-                    nueva_fila_g = pd.DataFrame([{
-                        "Código": cod_manual_g, "Nombre": var_manual_g.nombre,
-                        "Valor detectado": valor_manual_g, "Unidad": var_manual_g.unidad or "",
-                    }])
-                    df_editado_import_g = pd.concat([df_editado_import_g, nueva_fila_g], ignore_index=True)
+                if vars_texto:
+                    st.caption("Texto")
+                    _inicializar_df_manual("manual_texto", ["Código", "Valor"])
+                    df_txt = st.data_editor(
+                        st.session_state["manual_texto"],
+                        num_rows="dynamic",
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Código": st.column_config.SelectboxColumn(
+                                "Código", options=sorted(vars_texto.keys()), required=True,
+                            ),
+                            "Valor": st.column_config.TextColumn("Valor", required=True),
+                        },
+                        key=f"editor_manual_texto_{pdf_suffix}",
+                    )
+                    st.session_state["manual_texto"] = df_txt.copy()
+                    for _, fila in df_txt.iterrows():
+                        codigo, valor = fila["Código"], fila["Valor"]
+                        if pd.notna(codigo) and codigo != "" and pd.notna(valor) and str(valor).strip():
+                            var = vars_texto[codigo]
+                            filas_nuevas.append({
+                                "Código": codigo, "Nombre": var.nombre,
+                                "Valor detectado": valor, "Unidad": var.unidad or ""
+                            })
+
+                if filas_nuevas:
+                    df_editado_import_g = pd.concat(
+                        [df_editado_import_g, pd.DataFrame(filas_nuevas)],
+                        ignore_index=True
+                    )
 
                 if st.button("✅ Confirmar e Importar al Historial", type="primary", key="btn_confirmar_import_global"):
                     session_import = SessionLocal()
@@ -680,6 +1045,14 @@ try:
                                     fecha_nacimiento=datos_paciente_nuevo["fecha_nacimiento"],
                                     sexo=datos_paciente_nuevo["sexo"],
                                 )
+                                if hasattr(nuevo_paciente, 'prevision'):
+                                    nuevo_paciente.prevision = datos_paciente_nuevo.get("prevision")
+                                if hasattr(nuevo_paciente, 'fono_fijo'):
+                                    nuevo_paciente.fono_fijo = datos_paciente_nuevo.get("fono_fijo") or None
+                                if hasattr(nuevo_paciente, 'telefono'):
+                                    nuevo_paciente.telefono = datos_paciente_nuevo.get("celular") or None
+                                if hasattr(nuevo_paciente, 'email'):
+                                    nuevo_paciente.email = datos_paciente_nuevo.get("email") or None
                                 session_import.add(nuevo_paciente)
                                 session_import.flush()
 
@@ -688,10 +1061,27 @@ try:
                                 fecha_estudio=fecha_import_g,
                                 tipo_estudio=tipo_import_g,
                                 medico=medico_import_g or None,
+                                ficha_clinica=ficha_clinica_import_g or None,
+                                diagnostico=diagnostico_import_g or None,
+                                peso=float(peso_import_g.replace(",", ".")) if peso_import_g else None,
+                                talla=float(talla_import_g.replace(",", ".")) if talla_import_g else None,
+                                asc_valor=float(asc_import_g) if asc_import_g else None,
+                                imc=float(imc_import_g) if imc_import_g else None,
+                                pas=pas_import_g or None,
+                                pad=pad_import_g or None,
+                                ritmo=ritmo_import_g or None,
+                                fcia=fcia_import_g or None,
                                 observaciones="[IMPORTADO DESDE PDF]",
                                 pdf_original=datos_cache_g["pdf_bytes"],
                                 pdf_nombre_archivo=datos_cache_g["pdf_nombre"],
                             )
+                            # Campos opcionales: solo si el modelo Estudio los define.
+                            # Evita "invalid keyword argument" si la columna no existe en la BD/modelo.
+                            if hasattr(nuevo_estudio, "procedencia"):
+                                nuevo_estudio.procedencia = procedencia_import_g or None
+                            if hasattr(nuevo_estudio, "destino"):
+                                nuevo_estudio.destino = destino_import_g or None
+
                             session_import.add(nuevo_estudio)
                             session_import.flush()
 
@@ -782,7 +1172,7 @@ try:
         df_filtrado = df_pacientes[mask]
 
         if not df_filtrado.empty:
-            st.markdown("---")  # separador visual
+            st.markdown("---")
             rut_filtrado = st.selectbox(
                 "🔍 Seleccione el paciente de la búsqueda",
                 options=df_filtrado["RUT"].tolist(),
@@ -792,7 +1182,6 @@ try:
                 key="selectbox_busqueda_historial",
             )
             if rut_filtrado:
-                # Sobrescribe el paciente seleccionado con el de la búsqueda
                 paciente_seleccionado_rut = rut_filtrado
                 paciente_obj = session.query(Paciente).filter(Paciente.rut == rut_filtrado).first()
         else:
@@ -903,7 +1292,6 @@ try:
 
             st.divider()
 
-            # Gráficos de evolución
             mediciones = []
             for est in estudios_paciente:
                 mediciones_q = session.query(

@@ -250,9 +250,27 @@ with col2:
 with col3:
     st.success("📁 **Ver Historial Clínico**\n\nBusca pacientes existentes, analiza tendencias y descarga PDFs históricos.")
     st.page_link("pages/historial.py", label="Ir a Historial", icon="🔍")
+# with col4:
+#     st.warning("📊 **Exportar Base de Datos**\n\nExporta los datos del sistema en formato PDF o Excel.")
+#     st.page_link("pages/exportar.py", label="Ir a Exportar", icon="📤")
+rol = st.session_state["usuario_actual"]["rol"]
+
 with col4:
-    st.warning("📊 **Exportar Base de Datos**\n\nExporta los datos del sistema en formato PDF o Excel.")
-    st.page_link("pages/exportar.py", label="Ir a Exportar", icon="📤")
+    if rol in ["Administrador", "Investigador"]:
+        st.warning(
+            "📊 **Exportar Base de Datos**\n\n"
+            "Exporta los datos del sistema en formato CSV o Excel."
+        )
+        st.page_link(
+            "pages/exportar.py",
+            label="Ir a Exportar",
+            icon="📤"
+        )
+    else:
+        st.success(
+            "🔒 **Acceso Clínico**\n\n"
+            "Su perfil está habilitado para el registro y consulta de estudios."
+        )
 
 st.divider()
 

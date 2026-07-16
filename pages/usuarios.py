@@ -61,7 +61,14 @@ def formatear_rut_usuario_callback(key_destino):
 
 st.title("👥 Gestión de Usuarios")
 
-tab1, tab2, tab3 = st.tabs(["➕ Registrar Nuevo Usuario", "📋 Usuarios Registrados", "🔑 Restablecer Contraseña"])
+# tab1, tab2, tab3 = st.tabs(["➕ Registrar Nuevo Usuario", "📋 Usuarios Registrados", "🔑 Restablecer Contraseña"])
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "➕ Registrar Nuevo Usuario",
+    "📋 Usuarios Registrados",
+    "🔑 Restablecer Contraseña",
+    "✏️ Modificar Usuario"
+])
 
 # --- PESTAÑA 1: CREAR USUARIO (SIN FORMULARIO) ---
 with tab1:
@@ -256,3 +263,105 @@ with tab3:
                     st.error(f"❌ Error al actualizar la contraseña: {e}")
                 finally:
                     session.close()
+
+# ==================================================
+# PESTAÑA 4: MODIFICAR USUARIO
+# ==================================================
+with tab4:
+
+    st.markdown("### ✏️ Modificar Datos de un Usuario")
+
+    if not todos_los_ruts:
+        st.info("No existen usuarios registrados.")
+    else:
+
+        session = SessionLocal()
+
+        try:
+            usuarios_dict = {
+                u.rut: u.nombre
+                for u in session.query(Usuario).all()
+            }            
+
+            rut_modificar = st.selectbox(
+                "Seleccione el usuario",
+                options=todos_los_ruts,
+                format_func=lambda rut: f"{usuarios_dict.get(rut, '')} ({rut})",
+                key="usuario_modificar"
+            )
+
+            usuario = (
+                session.query(Usuario)
+                .filter(Usuario.rut == rut_modificar)
+                .first()
+            )
+
+            roles = session.query(Rol).order_by(Rol.nombre).all()
+            nombres_roles = [r.nombre for r in roles]
+
+            indice = 0
+            for i, r in enumerate(roles):
+                if r.id == usuario.rol_id:
+                    indice = i
+                    break
+
+            with st.form("form_modificar_usuario"):
+
+                rut = st.text_input(
+                    "RUT",
+                    value=usuario.rut,
+                    disabled=True
+                )
+
+                nombre = st.text_input(
+                    "Nombre completo",
+                    value=usuario.nombre
+                )
+
+                email = st.text_input(
+                    "Email",
+                    value=usuario.email or ""
+                )
+
+                rol = st.selectbox(
+                    "Rol",
+                    nombres_roles,
+                    index=indice
+                )
+
+                activo = st.checkbox(
+                    "Cuenta habilitada",
+                    value=usuario.activo
+                )
+
+                guardar = st.form_submit_button(
+                    "💾 Guardar Cambios",
+                    type="primary"
+                )
+
+            if guardar:
+
+                usuario.nombre = nombre.strip()
+                usuario.email = email.strip()
+
+                rol_db = (
+                    session.query(Rol)
+                    .filter(Rol.nombre == rol)
+                    .first()
+                )
+
+                usuario.rol_id = rol_db.id
+                usuario.activo = activo
+
+                session.commit()
+
+                st.success("✅ Usuario actualizado correctamente.")
+                time.sleep(1)
+                st.rerun()
+
+        except Exception as e:
+            session.rollback()
+            st.error(f"❌ Error al actualizar el usuario: {e}")
+
+        finally:
+            session.close()                    

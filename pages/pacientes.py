@@ -25,77 +25,21 @@ from datetime import date
 from database.database import SessionLocal
 from database.models import Paciente
 
+from utils.pacientes_utils import (
+    OPTS_PREV, OPTS_SEXO, DIC_PREFIJOS, LISTA_PREFIJOS,
+    formatear_rut_dinamico, formatear_telefono_dinamico,
+    separar_prefijo_numero, formatear_busqueda_rut,
+)
 
 # Configuración del título
 st.title("👤 Gestión de Pacientes")
 
 # ==================================================
-# CALLBACKS DINÁMICOS DE FORMATEO Y HELPERS
+# CALLBACK DE FORMATEO DE BÚSQUEDA (key propia de esta página)
 # ==================================================
 def formatear_busqueda_callback():
     busqueda_actual = st.session_state.get("busqueda_input_pacientes", "")
-    if not busqueda_actual: return
-    limpio = busqueda_actual.replace(".", "").replace("-", "").strip().upper()
-    if 7 <= len(limpio) <= 9:
-        cuerpo = limpio[:-1]
-        dv = limpio[-1]
-        if cuerpo.isdigit() and (dv.isdigit() or dv == "K"):
-            cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
-            st.session_state.busqueda_input_pacientes = f"{cuerpo_formateado}-{dv}"
-
-def formatear_rut_dinamico(k):
-    rut_actual = st.session_state.get(k, "")
-    if not rut_actual:
-        return
-
-    # Mantener solo números y K
-    rut_limpio = "".join(c for c in rut_actual.upper() if c.isdigit() or c == "K")
-
-    # Máximo 9 caracteres: 8 del cuerpo + DV
-    rut_limpio = rut_limpio[:9]
-
-    if len(rut_limpio) < 2:
-        st.session_state[k] = rut_limpio
-        return
-
-    cuerpo = rut_limpio[:-1]
-    dv = rut_limpio[-1]
-
-    if cuerpo.isdigit():
-        cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
-        st.session_state[k] = f"{cuerpo_formateado}-{dv}"
-
-def formatear_telefono_dinamico(k):
-    telf_actual = st.session_state.get(k, "")
-
-    if not telf_actual:
-        return
-
-    # Mantener solo números
-    numeros = "".join(c for c in str(telf_actual) if c.isdigit())
-
-    # Restringir estrictamente a un máximo de 9 dígitos
-    numeros = numeros[:9]
-
-    # Formateo progresivo en bloques de 3 (sin prefijo)
-    if len(numeros) <= 3:
-        st.session_state[k] = numeros
-    elif len(numeros) <= 6:
-        st.session_state[k] = f"{numeros[:3]} {numeros[3:]}"
-    else:
-        st.session_state[k] = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
-
-def separar_prefijo_numero(tel_str):
-    """Separa el prefijo del número base para rellenar los inputs al editar"""
-    if not tel_str: 
-        return "+56", ""
-    tel_str = tel_str.strip()
-    if tel_str.startswith("+") and " " in tel_str:
-        partes = tel_str.split(" ", 1)
-        return partes[0], partes[1]
-    elif tel_str.startswith("+56"): # Porc si hay registros antiguos sin espacio
-        return "+56", tel_str[3:].strip()
-    return "+56", tel_str
+    st.session_state.busqueda_input_pacientes = formatear_busqueda_rut(busqueda_actual)
 
 # ==================================================
 # SELECCIÓN Y BÚSQUEDA DE PACIENTE
@@ -194,13 +138,11 @@ v_ap = paciente_existente.apellido_paterno if paciente_existente else ""
 v_am = paciente_existente.apellido_materno if paciente_existente and paciente_existente.apellido_materno else ""
 v_fn = paciente_existente.fecha_nacimiento if paciente_existente and paciente_existente.fecha_nacimiento else date(2000, 1, 1)
 
-opts_prev = ["", "Fonasa", "Isapre", "Otra"]
 v_prev = getattr(paciente_existente, 'prevision', "") if paciente_existente else ""
-idx_prev = opts_prev.index(v_prev) if v_prev in opts_prev else 0
+idx_prev = OPTS_PREV.index(v_prev) if v_prev in OPTS_PREV else 0
 
-opts_sexo = ["", "Masculino", "Femenino"]
 v_sexo = paciente_existente.sexo if paciente_existente and paciente_existente.sexo else ""
-idx_sexo = opts_sexo.index(v_sexo) if v_sexo in opts_sexo else 0
+idx_sexo = OPTS_SEXO.index(v_sexo) if v_sexo in OPTS_SEXO else 0
 
 # Separación de prefijos para los teléfonos
 v_fono_completo = getattr(paciente_existente, 'fono_fijo', "") if paciente_existente else ""
@@ -215,26 +157,6 @@ prefijo_key = paciente_existente.rut if paciente_existente else "nuevo"
 key_rut = f"rut_input_{prefijo_key}"
 key_fono_base = f"fono_base_input_{prefijo_key}"      
 key_celular_base = f"cel_base_input_{prefijo_key}"
-
-# Diccionario de prefijos
-dic_prefijos = {
-    "+56": "🇨🇱 +56",
-    "+54": "🇦🇷 +54",
-    "+51": "🇵🇪 +51",
-    "+57": "🇨🇴 +57",
-    "+52": "🇲🇽 +52",
-    "+58": "🇻🇪 +58",
-    "+593": "🇪🇨 +593",
-    "+591": "🇧🇴 +591",
-    "+595": "🇵🇾 +595",
-    "+598": "🇺🇾 +598",
-    "+55": "🇧🇷 +55",
-    "+1":  "🇺🇸/🇨🇦 +1",
-    "+34": "🇪🇸 +34",
-    "OTRO": "🌍 Otro..."
-}
-lista_prefijos = list(dic_prefijos.keys())
-
 
 # ==================================================
 # FORMULARIO DE PACIENTE
@@ -267,20 +189,20 @@ if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
         edad_paciente = hoy.year - fecha_nacimiento.year - ((hoy.month, hoy.day) < (fecha_nacimiento.month, fecha_nacimiento.day))
         st.text_input("Edad calculada", value=f"{edad_paciente} años", disabled=True)
     with col7:
-        prevision = st.selectbox("Previsión", opts_prev, index=idx_prev)
+        prevision = st.selectbox("Previsión", OPTS_PREV, index=idx_prev)
     with col8:
-        sexo = st.selectbox("Sexo", opts_sexo, index=idx_sexo)        
+        sexo = st.selectbox("Sexo", OPTS_SEXO, index=idx_sexo)        
 
     col9, col10, col11 = st.columns(3)
     
     with col9: 
         c_pref1, c_num1 = st.columns([1, 2])
         with c_pref1:
-            idx_p_fono = lista_prefijos.index(pref_fono_ext) if pref_fono_ext in lista_prefijos else lista_prefijos.index("OTRO")
-            sel_pref_fono = st.selectbox("Cód.", options=lista_prefijos, index=idx_p_fono, format_func=lambda x: dic_prefijos[x], key=f"p_fono_{prefijo_key}")
+            idx_p_fono = LISTA_PREFIJOS.index(pref_fono_ext) if pref_fono_ext in LISTA_PREFIJOS else LISTA_PREFIJOS.index("OTRO")
+            sel_pref_fono = st.selectbox("Cód.", options=LISTA_PREFIJOS, index=idx_p_fono, format_func=lambda x: DIC_PREFIJOS[x], key=f"p_fono_{prefijo_key}")
             
             if sel_pref_fono == "OTRO":
-                prefijo_fono = st.text_input("Escriba Cód.", value=pref_fono_ext if pref_fono_ext not in lista_prefijos else "+", key=f"m_fono_{prefijo_key}")
+                prefijo_fono = st.text_input("Escriba Cód.", value=pref_fono_ext if pref_fono_ext not in LISTA_PREFIJOS else "+", key=f"m_fono_{prefijo_key}")
             else:
                 prefijo_fono = sel_pref_fono
 
@@ -300,11 +222,11 @@ if opcion_paciente == "Ingresar nuevo paciente" or paciente_existente:
     with col10: 
         c_pref2, c_num2 = st.columns([1, 2])
         with c_pref2:
-            idx_p_cel = lista_prefijos.index(pref_cel_ext) if pref_cel_ext in lista_prefijos else lista_prefijos.index("OTRO")
-            sel_pref_cel = st.selectbox("Cód.", options=lista_prefijos, index=idx_p_cel, format_func=lambda x: dic_prefijos[x], key=f"p_cel_{prefijo_key}")
+            idx_p_cel = LISTA_PREFIJOS.index(pref_cel_ext) if pref_cel_ext in LISTA_PREFIJOS else LISTA_PREFIJOS.index("OTRO")
+            sel_pref_cel = st.selectbox("Cód.", options=LISTA_PREFIJOS, index=idx_p_cel, format_func=lambda x: DIC_PREFIJOS[x], key=f"p_cel_{prefijo_key}")
             
             if sel_pref_cel == "OTRO":
-                prefijo_cel = st.text_input("Escriba Cód.", value=pref_cel_ext if pref_cel_ext not in lista_prefijos else "+", key=f"m_cel_{prefijo_key}")
+                prefijo_cel = st.text_input("Escriba Cód.", value=pref_cel_ext if pref_cel_ext not in LISTA_PREFIJOS else "+", key=f"m_cel_{prefijo_key}")
             else:
                 prefijo_cel = sel_pref_cel
 
