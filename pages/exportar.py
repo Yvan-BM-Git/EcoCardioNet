@@ -20,6 +20,15 @@ if not st.session_state.get("autenticado", False):
         st.switch_page("app.py")                   # Nombre del script principal
     st.stop()
 
+# ==================================================
+# PERMISOS: SOLO ADMINISTRADOR E INVESTIGADOR
+# ==================================================
+rol_actual = st.session_state.get("usuario_actual", {}).get("rol", "")
+
+if rol_actual not in ["Administrador", "Investigador"]:
+    st.error("🚫 Acceso denegado.")
+    st.stop()
+
 import pandas as pd
 import numpy as np
 import io
@@ -64,7 +73,10 @@ try:
             datos_base.append({
                 'estudio_id': est.id,
                 'rut': pac.rut,
-                # 'nombres': pac.nombres,
+                'fecha_estudio': f_est_str,
+                'nombres': pac.nombres,
+                'apellido_paterno': pac.apellido_paterno,
+                'apellido_materno': pac.apellido_materno,
                 # 'apellidos': f"{pac.apellido_paterno} {pac.apellido_materno or ''}".strip(),
                 # 'fecha_nacimiento': f_nac_str,
                 'edad_calculada': edad,
@@ -73,7 +85,6 @@ try:
                 # 'fono_fijo': getattr(pac, 'fono_fijo', None),
                 # 'celular': pac.telefono,
                 # 'email': pac.email,
-                'fecha_estudio': f_est_str,
                 'medico_responsable': est.medico,
                 'tipo_estudio': est.tipo_estudio,
                 # 'ficha_clinica': getattr(est, 'ficha_clinica', None),
@@ -83,7 +94,7 @@ try:
                 'peso_kg': getattr(est, 'peso', None),
                 'talla_cm': getattr(est, 'talla', None),
                 'asc': getattr(est, 'asc_valor', None),
-                'imc': getattr(est, 'imc_valor', None),  # <-- corregido: el atributo del modelo es 'imc', no 'imc_valor'
+                'imc': getattr(est, 'imc_valor', None),  
                 'pas': getattr(est, 'pas', None),
                 'pad': getattr(est, 'pad', None),
                 'ritmo': getattr(est, 'ritmo', None),
@@ -200,7 +211,7 @@ try:
                     "de datos como de esta tabla de exportación."
                 )
 
-                columnas_id = ["estudio_id", "rut", "fecha_estudio", "medico_responsable", "tipo_estudio"]
+                columnas_id = ["estudio_id", "fecha_estudio", "rut", 'nombres', 'apellido_paterno', 'apellido_materno', "medico_responsable"]
                 columnas_id_presentes = [c for c in columnas_id if c in df_final.columns]
 
                 df_seleccion = df_final[columnas_id_presentes].copy()
@@ -243,6 +254,136 @@ try:
                                 st.error(f"❌ Error al eliminar: {e}")
                             finally:
                                 session_del.close()
+
+            # ==========================================
+            # PASO 6: ELIMINAR PACIENTES (SOLO ADMINISTRADOR)
+            # ==========================================
+            if es_admin:
+                st.divider()
+                st.subheader("🗑️ Eliminar Pacientes (solo Administrador)")
+
+                st.caption(
+                    "Eliminar un paciente borrará permanentemente todos sus estudios "
+                    "y todas las mediciones asociadas."
+                )
+
+                pacientes_db=session.query(Paciente).all()
+
+                datos_pacientes=[]
+
+                for pac in pacientes_db:
+
+                    n_estudios=session.query(Estudio).filter(
+                        Estudio.paciente_rut==pac.rut
+                    ).count()
+
+                    datos_pacientes.append({
+
+                        "Eliminar":False,
+                        "RUT":pac.rut,
+                        "Nombres":pac.nombres,
+                        "Apellido paterno":pac.apellido_paterno,
+                        "Apellido materno":pac.apellido_materno,
+                        "Sexo":pac.sexo,
+                        "N° Estudios":n_estudios
+
+                    })
+
+                df_pacientes=pd.DataFrame(datos_pacientes)
+
+                df_pacientes_editado=st.data_editor(
+
+                    df_pacientes,
+
+                    hide_index=True,
+
+                    use_container_width=True,
+
+                    disabled=[
+                        "RUT",
+                        "Nombres",
+                        "Apellido paterno",
+                        "Apellido materno",
+                        "Sexo",
+                        "N° Estudios"
+                    ],
+
+                    key="editor_eliminar_pacientes"
+
+                )
+
+                pacientes_eliminar=df_pacientes_editado[
+                    df_pacientes_editado["Eliminar"]
+                ]
+
+                if not pacientes_eliminar.empty:
+
+                    st.error(
+                        f"Se eliminarán {len(pacientes_eliminar)} paciente(s) "
+                        "con todos sus estudios."
+                    )
+
+                    confirmar=st.checkbox(
+                        "Confirmo la eliminación permanente de los pacientes seleccionados.",
+                        key="confirmar_borrado_pacientes"
+                    )
+
+                    if confirmar:
+
+                        if st.button(
+                            "🗑 Eliminar pacientes definitivamente",
+                            type="primary"
+                        ):
+
+                            session_del=SessionLocal()
+
+                            try:
+
+                                ruts=pacientes_eliminar["RUT"].tolist()
+
+                                estudios=session_del.query(Estudio.id).filter(
+                                    Estudio.paciente_rut.in_(ruts)
+                                ).all()
+
+                                ids_estudios=[x[0] for x in estudios]
+
+                                if ids_estudios:
+
+                                    session_del.query(Medicion).filter(
+                                        Medicion.estudio_id.in_(ids_estudios)
+                                    ).delete(
+                                        synchronize_session=False
+                                    )
+
+                                    session_del.query(Estudio).filter(
+                                        Estudio.id.in_(ids_estudios)
+                                    ).delete(
+                                        synchronize_session=False
+                                    )
+
+                                session_del.query(Paciente).filter(
+                                    Paciente.rut.in_(ruts)
+                                ).delete(
+                                    synchronize_session=False
+                                )
+
+                                session_del.commit()
+
+                                st.success(
+                                    f"Se eliminaron {len(ruts)} paciente(s)."
+                                )
+
+                                st.rerun()
+
+                            except Exception as e:
+
+                                session_del.rollback()
+
+                                st.error(e)
+
+                            finally:
+
+                                session_del.close()                                
 
 except Exception as e:
     st.error(f"Error procesando la exportación: {e}")
