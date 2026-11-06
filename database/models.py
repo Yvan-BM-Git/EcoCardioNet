@@ -115,8 +115,21 @@ class Medicion(Base):
     estudio_id = Column(Integer, ForeignKey("estudios.id"))
     variable_id = Column(Integer, ForeignKey("variables.id"))
     codigo_variable = Column(String, nullable=False, index=True)
-    valor_num = Column(Float)
-    valor_texto = Column(String)
+    # Cada medición usa exactamente UNA de estas tres columnas:
+    valor_entero = Column(Integer, nullable=True)  # tipo "numero", entero  -> int
+    valor_num = Column(Float, nullable=True)       # tipo "numero", real    -> float
+    valor_texto = Column(String, nullable=True)    # tipo "categoria"       -> str
 
     variable = relationship("Variable")
     estudio = relationship("Estudio", back_populates="mediciones")
+
+    @property
+    def valor(self):
+        """Devuelve el valor con su tipo real: int, float o str (o None)."""
+        if self.valor_entero is not None:
+            return int(self.valor_entero)
+        if self.valor_num is not None:
+            return float(self.valor_num)
+        if self.valor_texto is not None:
+            return str(self.valor_texto)
+        return None

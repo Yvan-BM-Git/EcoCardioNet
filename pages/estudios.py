@@ -20,12 +20,27 @@ if not st.session_state.get("autenticado", False):
         st.switch_page("app.py")                   # Nombre del script principal
     st.stop()     
 
+import os
+import tempfile
+import io
+import re
+import unicodedata
+from PIL import Image, ImageOps
+
+# Soporte opcional para fotos HEIC/HEIF del iPhone (pip install pillow-heif)
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _TIPOS_IMAGEN = ["png", "jpg", "jpeg", "heic", "heif"]
+except ImportError:
+    _TIPOS_IMAGEN = ["png", "jpg", "jpeg"]
 import pandas as pd
 from datetime import date, datetime
 
 from database.database import SessionLocal
 from database.models import Paciente, Estudio, Variable, Medicion
 from utils.pdf_informe import generar_pdf_desde_historial
+from utils.valvulopatias import evaluar_valvulopatias, conclusion_global_valvular
 
 # Inicializar la lista de médicos en la memoria de la sesión
 if "lista_medicos_bd" not in st.session_state:
@@ -36,6 +51,84 @@ if "lista_medicos_bd" not in st.session_state:
         "Dr. Jorge Ardiles González", 
         "Dr. Viet Nguyen"
     ]
+
+# ==================================================
+# EDICIÓN TEMPORAL DEL ESTUDIO
+# ==================================================
+# Cada paciente tiene su propio borrador temporal dentro de la sesión.
+# Estos borradores NO se guardan en la base de datos hasta "Guardar informe".
+if "borradores_estudios" not in st.session_state:
+    st.session_state["borradores_estudios"] = {}
+
+if "borrador_estudio" not in st.session_state:
+    st.session_state["borrador_estudio"] = {}
+
+def _restaurar_campo_estudio(key, default=""):
+    """Restaura un campo desde el borrador temporal del paciente activo."""
+    if key not in st.session_state:
+        st.session_state[key] = st.session_state["borrador_estudio"].get(key, default)
+
+def _guardar_campos_estudio_temporales():
+    """Copia los valores actuales al borrador temporal del paciente activo."""
+    borrador = st.session_state["borrador_estudio"]
+    for key in [
+        "medico_seleccionado_estudio", "medico_otro_estudio", "tipo_estudio",
+        "fecha_estudio", "ficha_clinica", "patologias_seleccionadas",
+        "otra_patologia", "procedencia", "destino", "peso_input", "talla_input",
+        "pas", "pad", "ritmo", "fcia", "observaciones",
+        "hallazgos_editables", "conclusiones_editables"
+    ]:
+        if key in st.session_state:
+            borrador[key] = st.session_state[key]
+
+    for key, value in list(st.session_state.items()):
+        if key.startswith("var_"):
+            borrador[key] = value
+
+def _guardar_snapshot_paciente_actual():
+    """Guarda una copia completa de la edición actual solo en memoria."""
+    rut_activo = st.session_state.get("paciente_estudio_activo")
+    if not rut_activo:
+        return
+    _guardar_campos_estudio_temporales()
+    st.session_state["borradores_estudios"][rut_activo] = dict(
+        st.session_state.get("borrador_estudio", {})
+    )
+
+
+def _limpiar_widgets_estudio():
+    """Limpia solo los widgets del estudio para cargar otro borrador."""
+    for key in list(st.session_state.keys()):
+        if key.startswith("var_") or key in {
+            "medico_seleccionado_estudio", "medico_otro_estudio", "tipo_estudio",
+            "fecha_estudio", "ficha_clinica", "patologias_seleccionadas",
+            "otra_patologia", "procedencia", "destino", "peso_input", "talla_input",
+            "pas", "pad", "ritmo", "fcia", "observaciones",
+            "hallazgos_editables", "conclusiones_editables"
+        }:
+            st.session_state.pop(key, None)
+
+def _cambiar_paciente_temporal(rut_nuevo):
+    """Guarda el trabajo del paciente anterior y carga el del nuevo."""
+    if not rut_nuevo:
+        return
+
+    rut_anterior = st.session_state.get("paciente_estudio_activo")
+
+    # Antes de cambiar, conserva TODO lo que se estaba editando del paciente anterior.
+    if rut_anterior and rut_anterior != rut_nuevo:
+        _guardar_snapshot_paciente_actual()
+
+    if rut_anterior != rut_nuevo:
+        # Recupera el borrador existente del nuevo paciente, si lo tenía.
+        borrador_nuevo = st.session_state["borradores_estudios"].get(rut_nuevo, {})
+        st.session_state["borrador_estudio"] = dict(borrador_nuevo)
+        st.session_state["paciente_estudio_activo"] = rut_nuevo
+        _limpiar_widgets_estudio()
+
+        # Reinicia el contador del aviso para el paciente que acaba de abrirse.
+        st.session_state["inicio_edicion_estudio"] = datetime.now()
+
 
 # ==================================================
 # FUNCIONES DE FORMATEO (Agregar en pages/estudios.py)
@@ -201,120 +294,314 @@ finally:
 # ==================================================
 # 2. FUNCIONES DE LÓGICA Y CÁLCULOS
 # ==================================================
+def _to_float(valor):
+    """Convierte valores numéricos escritos con coma o punto a float."""
+    if valor is None:
+        return None
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    try:
+        return float(texto.replace(",", "."))
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalizar_texto(valor):
+    if valor is None:
+        return ""
+    return str(valor).strip()
+
+
+# --- Validación de tipos de variables ---------------------------------
+# Acepta: 70, -3, +12, 12.5, 12,5, .5   Rechaza: letras, "12,5,3", "1e3", vacío
+_PATRON_NUMERO = re.compile(r"^[+-]?(\d+([.]\d*)?|[.]\d+)$")
+
+
+_SINONIMOS_TIPO = {
+    "numero": "numero", "numerico": "numero", "numerica": "numero", "number": "numero",
+    "numeric": "numero", "float": "numero", "int": "numero", "entero": "numero",
+    "decimal": "numero", "real": "numero",
+    "categoria": "categoria", "categorica": "categoria", "categorico": "categoria",
+    "category": "categoria", "categorical": "categoria", "opcion": "categoria",
+    "opciones": "categoria", "lista": "categoria", "string": "categoria",
+    "booleano": "booleano", "boolean": "booleano", "bool": "booleano",
+}
+
+
+def tipo_variable(variable):
+    """
+    Devuelve el tipo normalizado de una variable: "numero", "categoria",
+    "booleano" o el texto original.
+
+    La columna `tipo` viene de la tabla `variables` (cargada desde el Excel).
+    Si allí quedó "Numero", "número", "numero " (con espacio) o "Numérico",
+    una comparación exacta con "numero" fallaba y el campo se trataba como
+    texto libre, SIN validación. Esta función lo corrige.
+    """
+    t = str(getattr(variable, "tipo", "") or "").strip().lower()
+    t = unicodedata.normalize("NFD", t)
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return _SINONIMOS_TIPO.get(t, t)
+
+
+def convertir_numero(valor):
+    """
+    Convierte lo que escribió el usuario en una variable de tipo "numero".
+
+    - Sin parte decimal  -> int    ("70"   -> 70)
+    - Con parte decimal  -> float  ("12,5" -> 12.5 ; "70,0" -> 70.0)
+    - Cualquier otra cosa -> None  (dato inválido)
+    """
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        return valor
+    texto = str(valor).strip().replace(",", ".")
+    if not _PATRON_NUMERO.match(texto):
+        return None
+    return float(texto) if "." in texto else int(texto)
+
+
+def convertir_categoria(valor, opciones_txt):
+    """
+    Valida una variable de tipo "categoria": siempre devuelve str.
+    Si la variable tiene opciones definidas, el valor debe ser una de ellas.
+    Devuelve None si el valor no es válido.
+    """
+    if valor is None or isinstance(valor, bool):
+        return None
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    if opciones_txt:
+        opciones = [x.strip() for x in str(opciones_txt).split(";") if x.strip()]
+        if texto not in opciones:
+            return None
+    return texto
+
+
+def asignar_valor_medicion(med, variable, valor):
+    """
+    Guarda el valor en la columna correcta según el tipo de la variable.
+    Devuelve True si se asignó, False si el dato no es válido.
+    """
+    med.valor_entero = med.valor_num = med.valor_texto = None
+    if tipo_variable(variable) == "numero":
+        numero = convertir_numero(valor)
+        if numero is None:
+            return False
+        if isinstance(numero, int):
+            med.valor_entero = numero      # int
+        else:
+            med.valor_num = float(numero)  # float
+        return True
+    if tipo_variable(variable) == "categoria":
+        texto = convertir_categoria(valor, variable.opciones)
+        if texto is None:
+            return False
+        med.valor_texto = texto            # str
+        return True
+    # Otros tipos (booleano, texto libre) se guardan como texto, como antes.
+    med.valor_texto = str(valor)
+    return True
+
+
 def clasificar_automatico(valores, sexo_paciente):
+    """Clasifica únicamente variables que realmente fueron ingresadas.
+
+    Regla fundamental: dato ausente != dato normal.
+    Esta función es la única fuente de clasificación que utilizan tanto
+    las tarjetas como la redacción automática del informe.
+    """
     auto = {}
 
     def obtener_float(codigo):
-        v = valores.get(codigo, "")
-        if v and str(v).strip():
-            try: return int(str(v).replace(",", "."))
-            except ValueError:
-                try: return float(str(v).replace(",", "."))
-                except ValueError: return None
-        return None 
+        return _to_float(valores.get(codigo))
 
+    # -----------------------------
+    # Aurícula izquierda
+    # -----------------------------
     vol_ai = obtener_float("VOLUMEN_AI")
     if vol_ai is not None:
-        if vol_ai <= 34: auto["GRADO_DILATACION_AI"] = "Normal"
-        elif vol_ai <= 41: auto["GRADO_DILATACION_AI"] = "Leve"
-        elif vol_ai <= 48: auto["GRADO_DILATACION_AI"] = "Moderada"
-        else: auto["GRADO_DILATACION_AI"] = "Severa"
+        if vol_ai <= 34:
+            auto["GRADO_DILATACION_AI"] = "Normal"
+        elif vol_ai <= 41:
+            auto["GRADO_DILATACION_AI"] = "Leve"
+        elif vol_ai <= 48:
+            auto["GRADO_DILATACION_AI"] = "Moderada"
+        else:
+            auto["GRADO_DILATACION_AI"] = "Severa"
 
+    # -----------------------------
+    # Pericardio
+    # -----------------------------
     derrame = obtener_float("MAGNITUD_DERRAME_PERICARDICO")
     if derrame is not None:
-        if derrame == 0: auto["GRADO_DERRAME_PERICARDICO"] = "Sin derrame"
-        elif derrame <= 10: auto["GRADO_DERRAME_PERICARDICO"] = "Leve"
-        elif derrame <= 20: auto["GRADO_DERRAME_PERICARDICO"] = "Moderado"
-        else: auto["GRADO_DERRAME_PERICARDICO"] = "Severo"
+        if derrame == 0:
+            auto["GRADO_DERRAME_PERICARDICO"] = "Sin derrame"
+        elif derrame <= 10:
+            auto["GRADO_DERRAME_PERICARDICO"] = "Leve"
+        elif derrame <= 20:
+            auto["GRADO_DERRAME_PERICARDICO"] = "Moderado"
+        else:
+            auto["GRADO_DERRAME_PERICARDICO"] = "Severo"
 
+    # -----------------------------
+    # Masa VI / hipertrofia
+    # -----------------------------
     masa_idx = obtener_float("MASA_VI_INDEXADA")
     if masa_idx is not None and sexo_paciente:
         es_hombre = sexo_paciente in ("Masculino", "M")
         if es_hombre:
-            if masa_idx <= 115: auto["GRADO_HIPERTROFIA_VI"] = "Normal"
-            elif masa_idx <= 131: auto["GRADO_HIPERTROFIA_VI"] = "Leve"
-            elif masa_idx <= 148: auto["GRADO_HIPERTROFIA_VI"] = "Moderada"
-            else: auto["GRADO_HIPERTROFIA_VI"] = "Severa"
+            if masa_idx <= 115:
+                auto["GRADO_HIPERTROFIA_VI"] = "Normal"
+            elif masa_idx <= 131:
+                auto["GRADO_HIPERTROFIA_VI"] = "Leve"
+            elif masa_idx <= 148:
+                auto["GRADO_HIPERTROFIA_VI"] = "Moderada"
+            else:
+                auto["GRADO_HIPERTROFIA_VI"] = "Severa"
         else:
-            if masa_idx <= 95: auto["GRADO_HIPERTROFIA_VI"] = "Normal"
-            elif masa_idx <= 108: auto["GRADO_HIPERTROFIA_VI"] = "Leve"
-            elif masa_idx <= 121: auto["GRADO_HIPERTROFIA_VI"] = "Moderada"
-            else: auto["GRADO_HIPERTROFIA_VI"] = "Severa"
+            if masa_idx <= 95:
+                auto["GRADO_HIPERTROFIA_VI"] = "Normal"
+            elif masa_idx <= 108:
+                auto["GRADO_HIPERTROFIA_VI"] = "Leve"
+            elif masa_idx <= 121:
+                auto["GRADO_HIPERTROFIA_VI"] = "Moderada"
+            else:
+                auto["GRADO_HIPERTROFIA_VI"] = "Severa"
 
+    # -----------------------------
+    # Hipertensión pulmonar por PSAP
+    # -----------------------------
     psap = obtener_float("PSAP")
     if psap is not None:
-        if psap <= 35: auto["PSAP_GRADO"] = "Normal"
-        elif psap <= 50: auto["PSAP_GRADO"] = "Leve"
-        elif psap <= 70: auto["PSAP_GRADO"] = "Moderada"
-        else: auto["PSAP_GRADO"] = "Severa"
+        if psap <= 35:
+            auto["PSAP_GRADO"] = "Normal"
+        elif psap <= 50:
+            auto["PSAP_GRADO"] = "Leve"
+        elif psap <= 70:
+            auto["PSAP_GRADO"] = "Moderada"
+        else:
+            auto["PSAP_GRADO"] = "Severa"
 
+    # -----------------------------
+    # Estenosis aórtica
+    # -----------------------------
     vpeak_ao = obtener_float("VELOCIDAD_PICO_AORTICA")
     if vpeak_ao is not None:
-        if vpeak_ao < 2.0: auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Normal"
-        elif vpeak_ao < 3.0: auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Leve"
-        elif vpeak_ao < 4.0: auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Severa"
+        if vpeak_ao < 2.0:
+            auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Normal"
+        elif vpeak_ao < 3.0:
+            auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Leve"
+        elif vpeak_ao < 4.0:
+            auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_AO_VPEAK"] = "Severa"
 
     gdte_ao = obtener_float("GRADIENTE_MEDIO_AORTICO")
     if gdte_ao is not None:
-        if gdte_ao < 20: auto["GRADO_ESTENOSIS_AO_GDTE"] = "Normal/Leve"
-        elif gdte_ao < 40: auto["GRADO_ESTENOSIS_AO_GDTE"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_AO_GDTE"] = "Severa"
+        if gdte_ao < 20:
+            auto["GRADO_ESTENOSIS_AO_GDTE"] = "Normal/Leve"
+        elif gdte_ao < 40:
+            auto["GRADO_ESTENOSIS_AO_GDTE"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_AO_GDTE"] = "Severa"
 
     avao = obtener_float("AREA_VALVULAR_AORTICA_CONTINUIDAD")
     if avao is not None:
-        if avao > 1.5: auto["GRADO_ESTENOSIS_AO_AVAO"] = "Leve"
-        elif avao >= 1.0: auto["GRADO_ESTENOSIS_AO_AVAO"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_AO_AVAO"] = "Severa"
+        if avao > 1.5:
+            auto["GRADO_ESTENOSIS_AO_AVAO"] = "Leve"
+        elif avao >= 1.0:
+            auto["GRADO_ESTENOSIS_AO_AVAO"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_AO_AVAO"] = "Severa"
 
     ivd = obtener_float("INDICE_VELOCIDAD_DOPPLER")
     if ivd is not None:
-        if ivd > 0.50: auto["GRADO_ESTENOSIS_AO_IVD"] = "Normal"
-        elif ivd >= 0.25: auto["GRADO_ESTENOSIS_AO_IVD"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_AO_IVD"] = "Severa"
+        if ivd > 0.50:
+            auto["GRADO_ESTENOSIS_AO_IVD"] = "Normal"
+        elif ivd >= 0.25:
+            auto["GRADO_ESTENOSIS_AO_IVD"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_AO_IVD"] = "Severa"
 
+    # -----------------------------
+    # Hipertensión pulmonar por TAP
+    # -----------------------------
     tap = obtener_float("TIEMPO_ACELERACION_PULMONAR")
     if tap is not None:
-        if tap > 120: auto["GRADO_TAP"] = "Normal"
-        elif tap >= 100: auto["GRADO_TAP"] = "Límite"
-        else: auto["GRADO_TAP"] = "Sugerente de HTP"
+        if tap > 120:
+            auto["GRADO_TAP"] = "Normal"
+        elif tap >= 100:
+            auto["GRADO_TAP"] = "Límite"
+        else:
+            auto["GRADO_TAP"] = "Sugerente de HTP"
 
+    # -----------------------------
+    # Estenosis mitral / Wilkins
+    # -----------------------------
     wilkins = obtener_float("SCORE_WILKINS")
     if wilkins is not None:
-        if wilkins <= 8: auto["GRADO_WILKINS"] = "Favorable"
-        elif wilkins <= 11: auto["GRADO_WILKINS"] = "Intermedio"
-        else: auto["GRADO_WILKINS"] = "Desfavorable"
+        if wilkins <= 8:
+            auto["GRADO_WILKINS"] = "Favorable"
+        elif wilkins <= 11:
+            auto["GRADO_WILKINS"] = "Intermedio"
+        else:
+            auto["GRADO_WILKINS"] = "Desfavorable"
 
     area_mit = obtener_float("AREA_MITRAL")
     if area_mit is not None:
-        if area_mit >= 4.0: auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Normal"
-        elif area_mit > 1.5: auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Leve"
-        elif area_mit >= 1.1: auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Severa"
+        if area_mit >= 4.0:
+            auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Normal"
+        elif area_mit > 1.5:
+            auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Leve"
+        elif area_mit >= 1.1:
+            auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_MITRAL_AREA"] = "Severa"
 
     gdte_mit = obtener_float("GRADIENTE_MEDIO_MITRAL")
     if gdte_mit is not None:
-        if gdte_mit <= 5: auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Normal"
-        elif gdte_mit <= 10: auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Moderada"
-        else: auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Severa"
+        if gdte_mit <= 5:
+            auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Normal"
+        elif gdte_mit <= 10:
+            auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Moderada"
+        else:
+            auto["GRADO_ESTENOSIS_MITRAL_GDTE"] = "Severa"
 
+    # -----------------------------
+    # Insuficiencia mitral
+    # -----------------------------
     vc_mit = obtener_float("VENA_CONTRACTA_MITRAL")
     if vc_mit is not None:
-        if vc_mit < 3: auto["GRADO_RM_VC"] = "Leve"
-        elif vc_mit < 7: auto["GRADO_RM_VC"] = "Moderada"
-        else: auto["GRADO_RM_VC"] = "Severa"
+        # 3 mm se conserva como límite superior de leve para evitar
+        # contradicción con el ejemplo trabajado anteriormente.
+        if vc_mit <= 3:
+            auto["GRADO_RM_VC"] = "Leve"
+        elif vc_mit < 7:
+            auto["GRADO_RM_VC"] = "Moderada"
+        else:
+            auto["GRADO_RM_VC"] = "Severa"
 
     eroa_mit = obtener_float("EROA_MITRAL")
     if eroa_mit is not None:
-        if eroa_mit < 0.20: auto["GRADO_RM_EROA"] = "Leve"
-        elif eroa_mit < 0.40: auto["GRADO_RM_EROA"] = "Moderada"
-        else: auto["GRADO_RM_EROA"] = "Severa"
+        if eroa_mit < 0.20:
+            auto["GRADO_RM_EROA"] = "Leve"
+        elif eroa_mit < 0.40:
+            auto["GRADO_RM_EROA"] = "Moderada"
+        else:
+            auto["GRADO_RM_EROA"] = "Severa"
 
     vol_rg = obtener_float("VOLUMEN_REGURGITANTE_MITRAL")
     if vol_rg is not None:
-        if vol_rg < 30: auto["GRADO_RM_VOL"] = "Leve"
-        elif vol_rg < 60: auto["GRADO_RM_VOL"] = "Moderada"
-        else: auto["GRADO_RM_VOL"] = "Severa"
+        if vol_rg < 30:
+            auto["GRADO_RM_VOL"] = "Leve"
+        elif vol_rg < 60:
+            auto["GRADO_RM_VOL"] = "Moderada"
+        else:
+            auto["GRADO_RM_VOL"] = "Severa"
 
     return auto
 
@@ -331,13 +618,22 @@ def on_numeric_change(codigo_var):
         
     valores_temp = {k.replace("var_", ""): v for k, v in st.session_state.items() if k.startswith("var_")}
     sexo_pac = st.session_state.get("paciente_existente_sexo") or st.session_state.get("sexo_input", "")
-    
+    # --- Cálculo automático de AVAo por Ecuación de Continuidad ---
+    area_tsvi = _to_float(valores_temp.get("AREA_TSVI"))
+    vti_tsvi  = _to_float(valores_temp.get("VTI_TSVI"))
+    vti_ao    = _to_float(valores_temp.get("VTI_AORTICO"))
+
+    if area_tsvi and vti_tsvi and vti_ao and vti_ao != 0:
+        avao_calc = (area_tsvi * vti_tsvi) / vti_ao
+        st.session_state["var_AREA_VALVULAR_AORTICA_CONTINUIDAD"] = f"{avao_calc:.2f}"
+
+
     nuevas_categorias = clasificar_automatico(valores_temp, sexo_pac)
     
     for cod_cat, valor_calculado in nuevas_categorias.items():
         key_cat = f"var_{cod_cat}"
         var_obj = variables_por_codigo.get(cod_cat)
-        if var_obj and var_obj.tipo == "categoria":
+        if var_obj and tipo_variable(var_obj) == "categoria":
             opciones_validas = [""] + [x.strip() for x in var_obj.opciones.split(";")] if var_obj.opciones else [""]
             if valor_calculado in opciones_validas:
                 st.session_state[key_cat] = valor_calculado
@@ -391,15 +687,64 @@ def formatear_telefono_callback():
 # ==================================================
 # CÁLCULO AUTOMÁTICO DE ASC E IMC (UNIFICADO)
 # ==================================================
+# ==================================================
+# CAMPOS GENERALES DEL ESTUDIO (peso, talla, PAS, PAD, FC)
+# No están en la tabla `variables`, por eso aquí se define su tipo.
+# Solo se exige que sean números (sin letras); no hay mínimos ni máximos.
+#   float -> admite decimales (70,5)      int -> solo enteros (120)
+# ==================================================
+CAMPOS_GENERALES = {
+    "peso_input":  {"nombre": "Peso (kg)",  "tipo": "float"},
+    "talla_input": {"nombre": "Talla (cm)", "tipo": "float"},
+    "pas":         {"nombre": "PAS (mmHg)", "tipo": "int"},
+    "pad":         {"nombre": "PAD (mmHg)", "tipo": "int"},
+    "fcia":        {"nombre": "FC (lpm)",   "tipo": "int"},
+}
+
+
+def validar_campo_general(key, texto=None):
+    """
+    Revisa un campo general. Devuelve (valor_convertido, mensaje_error).
+    Campo vacío -> (None, None): no es obligatorio.
+    """
+    cfg = CAMPOS_GENERALES[key]
+    if texto is None:
+        texto = st.session_state.get(key, "")
+    if texto is None or str(texto).strip() == "":
+        return None, None
+
+    numero = convertir_numero(texto)
+    if numero is None:
+        return None, f"{cfg['nombre']}: «{texto}» no es un número."
+
+    if cfg["tipo"] == "int":
+        if isinstance(numero, float):
+            if not numero.is_integer():
+                return None, f"{cfg['nombre']} debe ser un número entero (sin decimales)."
+            numero = int(numero)
+    else:
+        numero = float(numero)
+
+    return numero, None
+
+
+def on_change_campo_general(key):
+    """Si el dato no es válido, se borra y se avisa. Peso/talla recalculan ASC e IMC."""
+    _, error = validar_campo_general(key)
+    if error:
+        st.session_state[key] = ""
+        st.toast(error, icon="⚠️")
+    if key in ("peso_input", "talla_input"):
+        calcular_asc_imc()
+
+
 # NOTA: Streamlit solo permite UN callback on_change por widget, por eso ASC e IMC
 # se calculan juntos en una sola función y se engancha a peso_input y talla_input.
 def calcular_asc_imc():
     try:
-        p_val = st.session_state.get("peso_input", "").replace(",", ".")
-        t_val = st.session_state.get("talla_input", "").replace(",", ".")
-        if p_val and t_val:
-            p = float(p_val)
-            t = float(t_val)
+        p, _ = validar_campo_general("peso_input")
+        t, _ = validar_campo_general("talla_input")
+        if p is not None and t is not None:
             if p > 0 and t > 0:
                 asc_calc = 0.007184 * (p ** 0.425) * (t ** 0.725)
                 imc_calc = p / ((t / 100) ** 2)
@@ -440,24 +785,53 @@ def renderizar_variable(variable, col_contenedor):
                 st.markdown(f"<div style='padding-bottom:4px; font-size:15px; color:#4A5568'><b>{variable.nombre}</b></div>", unsafe_allow_html=True) 
 
         with col_input:
-            if variable.tipo == "numero":
-                key = f"var_{variable.codigo}"
-                valor = st.text_input(
-                    "", 
-                    key=key,
-                    label_visibility="collapsed",
-                    on_change=on_numeric_change,
-                    kwargs={"codigo_var": variable.codigo}
-                )
+            key = f"var_{variable.codigo}"
+            # Si el widget fue eliminado al cambiar de página, lo reconstruimos
+            # desde el borrador temporal antes de volver a mostrarlo.
+            if key not in st.session_state:
+                default_temporal = st.session_state["borrador_estudio"].get(key, "")
+                st.session_state[key] = default_temporal
 
-            elif variable.tipo == "categoria":
+            def _guardar_variable_y_calcular(codigo=variable.codigo, es_numero=(tipo_variable(variable) == "numero")):
+                k = f"var_{codigo}"
+                nuevo = st.session_state.get(k, "")
+                # Variables numéricas: si lo escrito no es un número, se rechaza
+                # y el campo vuelve a su último valor válido.
+                if es_numero and str(nuevo).strip() and convertir_numero(nuevo) is None:
+                    st.session_state[k] = st.session_state["borrador_estudio"].get(k, "")
+                    st.toast(f"«{nuevo}» no es un número. Use solo cifras (ej.: 70 o 12,5).", icon="⚠️")
+                    return
+                st.session_state["borrador_estudio"][k] = nuevo
+                on_numeric_change(codigo)
+                st.session_state["borrador_estudio"][f"var_{codigo}"] = st.session_state.get(f"var_{codigo}", "")
+
+            if tipo_variable(variable) == "numero":
+                valor = st.text_input(
+                    "", key=key, label_visibility="collapsed",
+                    placeholder="Ej.: 70 o 12,5",
+                    on_change=_guardar_variable_y_calcular
+                )
+                if str(valor).strip() and convertir_numero(valor) is None:
+                    st.markdown(
+                        "<div style='color:#d33; font-size:11px'>⚠ Solo números "
+                        "enteros o decimales (ej.: 70 o 12,5)</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            elif tipo_variable(variable) == "categoria":
                 opciones = ([""] + [x.strip() for x in variable.opciones.split(";")] if variable.opciones else [""])
-                valor = st.selectbox("", opciones, key=f"var_{variable.codigo}", label_visibility="collapsed")
+                valor = st.selectbox(
+                    "", opciones, key=key, label_visibility="collapsed",
+                    on_change=_guardar_variable_y_calcular
+                )
                 
-            elif variable.tipo == "booleano":
-                valor = st.checkbox("", key=f"var_{variable.codigo}")
+            elif tipo_variable(variable) == "booleano":
+                valor = st.checkbox("", key=key, on_change=_guardar_variable_y_calcular)
             else:
-                valor = st.text_input("", key=f"var_{variable.codigo}", label_visibility="collapsed")
+                valor = st.text_input("", key=key, label_visibility="collapsed", on_change=_guardar_variable_y_calcular)
+
+            # Mantener siempre una copia fuera del estado interno del widget.
+            st.session_state["borrador_estudio"][key] = valor
 
         with col_unidad:
             st.markdown(f"<div style='padding-top:6px; font-size:10px'><i>{variable.unidad if variable.unidad else '—'}</i></div>", unsafe_allow_html=True)
@@ -509,13 +883,18 @@ with col_seleccion:
         if "paciente_recien_creado" in st.session_state:
             st.session_state["selectbox_todos_estudios"] = st.session_state.pop("paciente_recien_creado")
 
+        paciente_guardado = st.session_state.get("paciente_estudio_activo")
+        if "selectbox_todos_estudios" not in st.session_state:
+            st.session_state["selectbox_todos_estudios"] = paciente_guardado if paciente_guardado in df_pacientes_todos["RUT"].tolist() else None
+
         rut_seleccionado = st.selectbox(
             "✅ Seleccionar un paciente existente", 
             options=df_pacientes_todos["RUT"].tolist(),
-            index=None,  
-            placeholder="Seleccionar 👇",  
+            index=None,
+            placeholder="Seleccionar 👇",
             format_func=lambda r: f"{df_pacientes_todos[df_pacientes_todos['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
-            key="selectbox_todos_estudios" # Key única, sin callback conflictivo
+            key="selectbox_todos_estudios",
+            on_change=lambda: _cambiar_paciente_temporal(st.session_state.get("selectbox_todos_estudios"))
         )
 
 # Selector dinámico de búsqueda (Aparece abajo si se busca algo, igual que en pacientes.py)
@@ -538,6 +917,9 @@ if busqueda and not df_pacientes_todos.empty:
         )
         if rut_filtrado:
             rut_seleccionado = rut_filtrado  # Prioriza el paciente seleccionado en la búsqueda
+            if st.session_state.get("paciente_estudio_activo") != rut_filtrado:
+                _cambiar_paciente_temporal(rut_filtrado)
+                st.session_state["selectbox_todos_estudios"] = rut_filtrado
     else:
         st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
 
@@ -832,6 +1214,66 @@ else:
     st.stop()
 
 # ==================================================
+# IMAGEN ADJUNTA (OPCIONAL)
+# ==================================================
+# Se ubica justo después de los datos del paciente (nombre, RUT, talla, etc.)
+# y antes de las mediciones, replicando el mismo orden en que aparecerá
+# dentro del PDF generado.
+st.markdown("<br>", unsafe_allow_html=True)
+st.subheader("🖼️ Imagen del estudio (opcional)")
+@st.cache_data(show_spinner=False)
+def normalizar_imagen(datos: bytes):
+    """
+    Devuelve la imagen como JPEG con la orientación ya corregida.
+
+    Las fotos de celular suelen guardarse "acostadas" y traen una etiqueta
+    EXIF que indica cómo girarlas. Aquí se aplica ese giro a los píxeles y
+    se elimina la etiqueta, para que la vista previa y el PDF muestren
+    exactamente lo mismo, sin importar si el archivo era JPG, PNG o HEIC.
+    """
+    try:
+        img = Image.open(io.BytesIO(datos))
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            if "A" in img.getbands():
+                fondo = Image.new("RGB", img.size, "white")
+                fondo.paste(img, mask=img.getchannel("A"))
+                img = fondo
+            else:
+                img = img.convert("RGB")
+        img.thumbnail((2000, 2000))  # reduce fotos de 10+ MB sin perder calidad útil
+        salida = io.BytesIO()
+        img.save(salida, format="JPEG", quality=90, optimize=True)
+        return salida.getvalue()
+    except Exception:
+        return None
+
+
+imagenes_adjuntas = st.file_uploader(
+    "Adjuntar imágenes (ecocardiografía, ECG, etc.)",
+    type=_TIPOS_IMAGEN,
+    accept_multiple_files=True,
+    key="imagen_estudio_uploader",
+    help="Opcional. Se insertarán en el PDF antes de las mediciones (máx. 10)."
+)
+
+imagenes_normalizadas = []
+if imagenes_adjuntas:
+    for archivo in imagenes_adjuntas[:10]:
+        datos_ok = normalizar_imagen(archivo.getvalue())
+        if datos_ok is None:
+            st.warning(f"No se pudo leer la imagen «{archivo.name}». Se omitirá.")
+            continue
+        imagenes_normalizadas.append((archivo.name, datos_ok))
+
+    if len(imagenes_adjuntas) > 10:
+        st.warning("Solo se incluirán las primeras 10 imágenes.")
+
+    cols_prev = st.columns(3)
+    for i, (nombre, datos_ok) in enumerate(imagenes_normalizadas):
+        cols_prev[i % 3].image(datos_ok, caption=nombre, width=200)
+
+# ==================================================
 # MEDICIONES Y DATOS GENERALES (SISTEMA DE PESTAÑAS)
 # ================================================== 
 # USUARIO AUTENTICADO 
@@ -850,93 +1292,99 @@ tabs = st.tabs(categorias_tabs)
 # --- PESTAÑA 1: DATOS GENERALES --- 
 with tabs[0]:
     st.markdown("<br>", unsafe_allow_html=True)
-    
+
+    # Restaurar campos que pertenecen al estudio actual antes de crear los widgets.
+    _restaurar_campo_estudio("medico_seleccionado_estudio", "Seleccione")
+    _restaurar_campo_estudio("medico_otro_estudio", "")
+    _restaurar_campo_estudio("tipo_estudio", "Ecocardiograma Transtorácico")
+    _restaurar_campo_estudio("fecha_estudio", date.today())
+    _restaurar_campo_estudio("ficha_clinica", "")
+    _restaurar_campo_estudio("patologias_seleccionadas", [])
+    _restaurar_campo_estudio("otra_patologia", "")
+    _restaurar_campo_estudio("procedencia", "")
+    _restaurar_campo_estudio("destino", "")
+    _restaurar_campo_estudio("peso_input", "")
+    _restaurar_campo_estudio("talla_input", "")
+    _restaurar_campo_estudio("pas", "")
+    _restaurar_campo_estudio("pad", "")
+    _restaurar_campo_estudio("ritmo", "")
+    _restaurar_campo_estudio("fcia", "")
+    _restaurar_campo_estudio("observaciones", "")
+
     col1, col2, col3, col4 = st.columns([3, 3, 1.5, 1.5])
     with col1:
-
         if rol_usuario == "Cardiólogo":
-
             medico = nombre_usuario
             medico_seleccionado = nombre_usuario
-
-            st.text_input(
-                "Médico responsable",
-                value=medico,
-                disabled=True
-            )
-
+            st.text_input("Médico responsable", value=medico, disabled=True)
         else:
-
             opciones_selector = st.session_state["lista_medicos_bd"] + ["Otro..."]
-
             medico_seleccionado = st.selectbox(
-                "Médico responsable",
-                opciones_selector
+                "Médico responsable", opciones_selector, key="medico_seleccionado_estudio"
             )
-
             if medico_seleccionado == "Otro...":
                 medico = st.text_input(
-                    "Especifique el médico",
-                    placeholder="Nombre del médico"
+                    "Especifique el médico", placeholder="Nombre del médico",
+                    key="medico_otro_estudio"
                 )
             else:
                 medico = medico_seleccionado
-                
-    with col2: tipo_estudio = st.selectbox("Tipo de estudio", ["Ecocardiograma Transtorácico", "Ecocardiograma Transesofágico", "Ecocardiograma de Estrés", "Ecocardiograma 3D"])
-    with col3: fecha_estudio = st.date_input("Fecha estudio", value=date.today(), format="DD/MM/YYYY")
-    with col4: ficha_clinica = st.text_input("Ficha Clínica")
+
+    tipos_estudio = ["Ecocardiograma Transtorácico", "Ecocardiograma Transesofágico", "Ecocardiograma de Estrés", "Ecocardiograma 3D"]
+    with col2:
+        tipo_estudio = st.selectbox("Tipo de estudio", tipos_estudio, key="tipo_estudio")
+    with col3:
+        fecha_estudio = st.date_input("Fecha estudio", format="DD/MM/YYYY", key="fecha_estudio")
+    with col4:
+        ficha_clinica = st.text_input("Ficha Clínica", key="ficha_clinica")
 
     col5, col6, col7 = st.columns(3)
     with col5:
         opciones_patologia = [
-            "Sin antecedentes",
-            "Hipertensión arterial (HTA)",
-            "Diabetes Mellitus tipo 2",
-            "Dislipidemia",
-            "Cardiopatía coronaria",
-            "Fibrilación auricular",
-            "Insuficiencia cardíaca",
-            "Enfermedad renal crónica",
-            "EPOC",
-            "Obesidad",
-            "Hipotiroidismo",
-            "Tabaquismo",
-            "Valvulopatía",
-            "Cardiopatía congénita",
-            "Otro..."
+            "Sin antecedentes", "Hipertensión arterial (HTA)", "Diabetes Mellitus tipo 2",
+            "Dislipidemia", "Cardiopatía coronaria", "Fibrilación auricular",
+            "Insuficiencia cardíaca", "Enfermedad renal crónica", "EPOC", "Obesidad",
+            "Hipotiroidismo", "Tabaquismo", "Valvulopatía", "Cardiopatía congénita", "Otro..."
         ]
         patologias_seleccionadas = st.multiselect(
-            "Patología de base",
-            opciones_patologia,
-            placeholder="Selecciona una o más patologías"
+            "Patología de base", opciones_patologia,
+            placeholder="Selecciona una o más patologías", key="patologias_seleccionadas"
         )
         otra_patologia = ""
         if "Otro..." in patologias_seleccionadas:
             otra_patologia = st.text_input(
                 "Especifique la(s) otra(s) patología(s)",
-                placeholder="Ej: Enfermedad de Chagas, etc."
+                placeholder="Ej: Enfermedad de Chagas, etc.", key="otra_patologia"
             )
         lista_patologias_final = [p for p in patologias_seleccionadas if p != "Otro..."]
         if otra_patologia.strip():
             lista_patologias_final.append(otra_patologia.strip())
         diagnostico = ", ".join(lista_patologias_final)
-    with col6: procedencia = st.text_input("Servicio de origen", placeholder="Ej: HRT, CESFAM, Dr. Eric Fuentes, etc.")
-    with col7: destino = st.text_input("Servicio de destino", placeholder="Ej: HRT, CESFAM, etc.")
-    
+    with col6:
+        procedencia = st.text_input("Servicio de origen", placeholder="Ej: HRT, CESFAM, Dr. Eric Fuentes, etc.", key="procedencia")
+    with col7:
+        destino = st.text_input("Servicio de destino", placeholder="Ej: HRT, CESFAM, etc.", key="destino")
 
     cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8 = st.columns([1, 1, 1, 1, 1, 1, 2, 1])
-    with cv1: peso = st.text_input("PESO (kg)", key="peso_input", on_change=calcular_asc_imc)
-    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input", on_change=calcular_asc_imc)
+    with cv1: peso = st.text_input("PESO (kg)", key="peso_input", placeholder="70,5",
+                                   on_change=on_change_campo_general, args=("peso_input",))
+    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input", placeholder="165",
+                                    on_change=on_change_campo_general, args=("talla_input",))
     with cv3: asc = st.text_input("ASC", value=st.session_state.asc_val, disabled=True)
     with cv4: imc = st.text_input("IMC", value=st.session_state.imc_val, disabled=True)
-    with cv5: pas = st.text_input("PAS")
-    with cv6: pad = st.text_input("PAD") 
-    with cv7: ritmo = st.selectbox("Ritmo", ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal", "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular", "Marcapaso", "Otro"])
-    with cv8: fcia = st.text_input("FCia")
-    # with cv8: eco_3d = st.selectbox("ECO 3D", ["", "Si", "No"])
-    # with cv9: eco_estres = st.selectbox("ECO Estrés", ["", "Si", "No"])
+    with cv5: pas = st.text_input("PAS", key="pas", placeholder="120",
+                                  on_change=on_change_campo_general, args=("pas",))
+    with cv6: pad = st.text_input("PAD", key="pad", placeholder="80",
+                                  on_change=on_change_campo_general, args=("pad",))
+    with cv7: ritmo = st.selectbox("Ritmo", ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal", "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular", "Marcapaso", "Otro"], key="ritmo")
+    with cv8: fcia = st.text_input("FCia", key="fcia", placeholder="72",
+                                   on_change=on_change_campo_general, args=("fcia",))
 
-    observaciones = st.text_area("Observaciones Generales")
+    observaciones = st.text_area("Observaciones Generales", key="observaciones")
+
+    # Guardar una copia temporal en cada rerun, sin tocar la base de datos.
+    _guardar_campos_estudio_temporales()
+    _guardar_snapshot_paciente_actual()
 
 # --- PESTAÑAS RESTANTES: VARIABLES DINÁMICAS ---
 num_categorias_dinamicas = len(tabs_estructura.keys())
@@ -957,53 +1405,437 @@ for tab, nombre_tab in zip(tabs[1:num_categorias_dinamicas+1], categorias_tabs[1
                     valores[variable.codigo] = renderizar_variable(variable, col)
 
 # --- ÚLTIMA PESTAÑA: INFORME CLÍNICO EDITABLE ---
+def obtener_valores_reales():
+    """Obtiene únicamente los inputs actualmente existentes en la sesión."""
+    return {
+        k.replace("var_", ""): v
+        for k, v in st.session_state.items()
+        if k.startswith("var_") and str(v).strip() != ""
+    }
+
+
+def obtener_valor_alias(valores_dict, *codigos):
+    """Devuelve el primer código con contenido. Permite tolerar nombres de
+    variables diferentes entre versiones de la base de datos/Excel."""
+    for codigo in codigos:
+        if codigo in valores_dict and str(valores_dict[codigo]).strip() != "":
+            return valores_dict[codigo]
+    return None
+
+
+def obtener_numero_alias(valores_dict, *codigos):
+    valor = obtener_valor_alias(valores_dict, *codigos)
+    return _to_float(valor)
+
+
+def formato_numero(valor, decimales=1):
+    if valor is None:
+        return None
+    return f"{valor:.{decimales}f}".replace(".", ",")
+
+
+def texto_cualitativo(valores_dict, *codigos):
+    valor = obtener_valor_alias(valores_dict, *codigos)
+    return _normalizar_texto(valor) if valor is not None else None
+
+
+def construir_informe_automatico(valores_dict, sexo_paciente):
+    """Genera hallazgos y conclusiones exclusivamente a partir de inputs.
+
+    No asume normalidad cuando falta una medición. Las conclusiones se
+    construyen a partir de las clasificaciones de clasificar_automatico().
+    """
+    auto = clasificar_automatico(valores_dict, sexo_paciente)
+    hallazgos = []
+    conclusiones = []
+
+    def agregar_hallazgo(texto):
+        if texto and texto.strip():
+            hallazgos.append(texto.strip())
+
+    def agregar_conclusion(texto):
+        if texto and texto.strip():
+            conclusiones.append(texto.strip())
+
+    # ==================================================
+    # VENTRÍCULO IZQUIERDO
+    # ==================================================
+    fevi = obtener_numero_alias(valores_dict, "FEVI", "FRACCION_EYECCION")
+    gpr = obtener_numero_alias(valores_dict, "GPR", "GPR_VI")
+    masa_idx = obtener_numero_alias(valores_dict, "MASA_VI_INDEXADA", "MASA_VI_ASC")
+    dvi_diast = obtener_numero_alias(valores_dict, "DIMENSION_DIASTOLICA_VI", "DVI_DIAST", "DVId")
+    dvi_sist = obtener_numero_alias(valores_dict, "DIMENSION_SISTOLICA_VI", "DVI_SIST", "DVIs")
+    hipertrofia = auto.get("GRADO_HIPERTROFIA_VI")
+    acortamiento = obtener_numero_alias(valores_dict, "FRACC_ACORTAMIENTO", "PORC_ACORTAMIENTO")
+    strain_vi = obtener_numero_alias(valores_dict, "STRAIN_LONGITUDINAL", "STRAIN_VI")
+
+    frases_vi = []
+    if dvi_diast is not None:
+        frases_vi.append(f"diámetro diastólico de {formato_numero(dvi_diast)} mm")
+    if dvi_sist is not None:
+        frases_vi.append(f"diámetro sistólico de {formato_numero(dvi_sist)} mm")
+    if hipertrofia and hipertrofia != "Normal":
+        frases_vi.append(f"hipertrofia {hipertrofia.lower()}" )
+    if gpr is not None:
+        frases_vi.append(f"GPR de {formato_numero(gpr, 2)}")
+    if masa_idx is not None:
+        frases_vi.append(f"masa VI indexada de {formato_numero(masa_idx, 0)} g/m²")
+
+    if frases_vi:
+        agregar_hallazgo("Ventrículo izquierdo: " + "; ".join(frases_vi) + ".")
+
+    if fevi is not None:
+        if fevi >= 55:
+            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo estimada por 2D de {formato_numero(fevi, 0)}%.")
+        elif fevi >= 50:
+            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo levemente reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
+        elif fevi >= 40:
+            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo moderadamente reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
+        else:
+            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
+        if fevi < 50:
+            agregar_conclusion(f"Disfunción sistólica del ventrículo izquierdo con FEVI de {formato_numero(fevi, 0)}%.")
+        else:
+            agregar_conclusion(f"Función sistólica global del ventrículo izquierdo conservada, con FEVI de {formato_numero(fevi, 0)}%.")
+
+    if acortamiento is not None:
+        agregar_hallazgo(f"Fracción de acortamiento de {formato_numero(acortamiento, 0)}%.")
+
+    if strain_vi is not None:
+        agregar_hallazgo(f"Strain longitudinal del ventrículo izquierdo de {formato_numero(strain_vi, 1)}%.")
+
+    if hipertrofia and hipertrofia != "Normal":
+        agregar_conclusion(f"Hipertrofia del ventrículo izquierdo {hipertrofia.lower()}.")
+
+    # ==================================================
+    # FUNCIÓN DIASTÓLICA
+    # ==================================================
+    onda_e = obtener_numero_alias(valores_dict, "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL")
+    onda_a = obtener_numero_alias(valores_dict, "ONDA_A", "ONDA_A_MITRAL", "A_MITRAL")
+    e_a = obtener_numero_alias(valores_dict, "E_A", "RELACION_E_A")
+    e_lateral = obtener_numero_alias(valores_dict, "E_PRIMA_LATERAL", "E_LATERAL", "E_PRIMA_LAT")
+    e_septal = obtener_numero_alias(valores_dict, "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP")
+    e_e = obtener_numero_alias(valores_dict, "E_E_PRIMA", "E_EPRIMA", "E_E")
+    td = obtener_numero_alias(valores_dict, "TIEMPO_DECELERACION", "T_D", "TD")
+
+    diastolica = []
+    if onda_e is not None:
+        diastolica.append(f"onda E de {formato_numero(onda_e, 2)} m/s")
+    if onda_a is not None:
+        diastolica.append(f"onda A de {formato_numero(onda_a, 2)} m/s")
+    if e_a is not None:
+        diastolica.append(f"relación E/A de {formato_numero(e_a, 2)}")
+    if td is not None:
+        diastolica.append(f"tiempo de desaceleración de {formato_numero(td, 0)} ms")
+    if e_lateral is not None:
+        diastolica.append(f"e' lateral de {formato_numero(e_lateral, 1)} cm/s")
+    if e_septal is not None:
+        diastolica.append(f"e' septal de {formato_numero(e_septal, 1)} cm/s")
+    if e_e is not None:
+        diastolica.append(f"E/e' de {formato_numero(e_e, 1)}")
+
+    if diastolica:
+        agregar_hallazgo("Función diastólica: " + "; ".join(diastolica) + ".")
+
+    if e_e is not None:
+        if e_e > 14:
+            agregar_conclusion("Hallazgos compatibles con aumento de las presiones de llenado del ventrículo izquierdo.")
+        elif e_e >= 8:
+            agregar_hallazgo("E/e' en rango intermedio; interpretar en conjunto con el resto de los parámetros de función diastólica.")
+
+    # ==================================================
+    # VENTRÍCULO DERECHO
+    # ==================================================
+    tapse = obtener_numero_alias(valores_dict, "TAPSE", "TAPSE_VD")
+    onda_s = obtener_numero_alias(valores_dict, "ONDA_S", "ONDA_S_PRIMA", "S_PRIMA")
+    diam_basal_vd = obtener_numero_alias(valores_dict, "DIAMETRO_BASAL_VD", "DIAM_BASAL_VD")
+    diam_medio_vd = obtener_numero_alias(valores_dict, "DIAMETRO_MEDIO_VD", "DIAM_MEDIO_VD")
+
+    vd = []
+    if diam_basal_vd is not None:
+        vd.append(f"diámetro basal de {formato_numero(diam_basal_vd, 0)} mm")
+    if diam_medio_vd is not None:
+        vd.append(f"diámetro medio de {formato_numero(diam_medio_vd, 0)} mm")
+    if tapse is not None:
+        vd.append(f"TAPSE de {formato_numero(tapse, 0)} mm")
+    if onda_s is not None:
+        vd.append(f"onda S' de {formato_numero(onda_s, 1)} cm/s")
+    if vd:
+        agregar_hallazgo("Ventrículo derecho: " + "; ".join(vd) + ".")
+
+    if tapse is not None and tapse < 17:
+        agregar_conclusion(f"Disminución de la función sistólica longitudinal del ventrículo derecho (TAPSE {formato_numero(tapse, 0)} mm).")
+
+    # ==================================================
+    # AURÍCULAS
+    # ==================================================
+    vol_ai = obtener_numero_alias(valores_dict, "VOLUMEN_AI")
+    grado_ai = auto.get("GRADO_DILATACION_AI")
+    if vol_ai is not None:
+        if grado_ai == "Normal":
+            agregar_hallazgo(f"Aurícula izquierda de tamaño conservado, con volumen indexado de {formato_numero(vol_ai, 0)} mL/m².")
+        else:
+            agregar_hallazgo(f"Aurícula izquierda {grado_ai.lower()}mente dilatada, con volumen indexado de {formato_numero(vol_ai, 0)} mL/m².")
+        if grado_ai and grado_ai != "Normal":
+            agregar_conclusion(f"Dilatación {grado_ai.lower()} de la aurícula izquierda.")
+
+    area_ad = obtener_numero_alias(valores_dict, "AREA_AD", "AREA_AURICULA_DERECHA")
+    if area_ad is not None:
+        agregar_hallazgo(f"Área de aurícula derecha de {formato_numero(area_ad, 0)} cm².")
+
+    # ==================================================
+    # VALVULOPATÍAS (motor único compartido con el PDF)
+    # Ver utils/valvulopatias.py: 8 valvulopatías con criterios
+    # ASE/EACVI/ESC/AHA y evaluación multiparamétrica.
+    # ==================================================
+    valvulas = evaluar_valvulopatias(valores_dict, sexo_paciente)
+    valv = {r["clave"]: r for r in valvulas}
+
+    def agregar_valvula(clave):
+        r = valv.get(clave)
+        if r:
+            agregar_hallazgo(r["texto"])
+            if r.get("conclusion"):
+                agregar_conclusion(r["conclusion"])
+
+    def _hay_protesis(texto):
+        return bool(texto) and texto.strip().lower() not in ("ausente", "no", "sin prótesis")
+
+    # ---- Válvula aórtica ----
+    vti_ao = obtener_numero_alias(valores_dict, "VTI_AORTICO", "VTI_AORTICA", "VTI_AO")
+    protesis_ao = texto_cualitativo(valores_dict, "PROTESIS_AORTICA")
+    agregar_valvula("estenosis_ao")
+    agregar_valvula("insuf_ao")
+    if vti_ao is not None:
+        agregar_hallazgo(f"VTI aórtica de {formato_numero(vti_ao, 0)} cm.")
+    if _hay_protesis(protesis_ao):
+        agregar_hallazgo(f"Prótesis aórtica: {protesis_ao}.")
+
+    # ---- Válvula mitral ----
+    protesis_mit = texto_cualitativo(valores_dict, "PROTESIS_MITRAL")
+    agregar_valvula("estenosis_mitral")
+    agregar_valvula("insuf_mit")
+    if _hay_protesis(protesis_mit):
+        agregar_hallazgo(f"Prótesis mitral: {protesis_mit}.")
+
+    # ---- Válvula tricúspide / presión pulmonar ----
+    v_it = obtener_numero_alias(valores_dict, "VELOCIDAD_MAXIMA_IT", "VEL_MAX_IT", "V_MAX_IT")
+    gdte_it = obtener_numero_alias(valores_dict, "GRADIENTE_MAXIMO_IT", "GDTE_MAX_IT")
+    vci = obtener_numero_alias(valores_dict, "DIAMETRO_VCI", "VENA_CAVA_INFERIOR", "VCI")
+    colapso_vci = obtener_numero_alias(valores_dict, "PUNTAJE_COLAPSO_VCI", "PORCENTAJE_COLAPSO_VCI", "COLAPSO_VCI", "PTJE_VCI")
+    psap = obtener_numero_alias(valores_dict, "PSAP")
+
+    agregar_valvula("estenosis_it")
+    agregar_valvula("insuf_it")
+
+    presion = []
+    if v_it is not None:
+        presion.append(f"Vmax IT {formato_numero(v_it, 1)} m/s")
+    if gdte_it is not None:
+        presion.append(f"gradiente máximo IT {formato_numero(gdte_it, 0)} mmHg")
+    if psap is not None:
+        presion.append(f"PSAP estimada de {formato_numero(psap, 0)} mmHg")
+    if presion:
+        agregar_hallazgo("Presión pulmonar: " + "; ".join(presion) + ".")
+
+    if vci is not None:
+        texto_vci = f"Vena cava inferior de {formato_numero(vci, 0)} mm"
+        if colapso_vci is not None:
+            texto_vci += f", con colapso inspiratorio de {formato_numero(colapso_vci, 0)}%"
+        agregar_hallazgo(texto_vci + ".")
+
+    ep = valv.get("estenosis_pulmonar")
+    hay_ep = bool(ep and ep.get("nivel") and ep["nivel"] >= 2)
+    if psap is not None and hay_ep:
+        agregar_conclusion(f"PSAP estimada de {formato_numero(psap, 0)} mmHg: con estenosis pulmonar asociada "
+                           "refleja la presión sistólica del VD y no equivale a hipertensión pulmonar.")
+    elif psap is not None:
+        grado_psap = auto.get("PSAP_GRADO")
+        if grado_psap and grado_psap != "Normal":
+            agregar_conclusion(f"Hipertensión pulmonar {grado_psap.lower()} según PSAP estimada de {formato_numero(psap, 0)} mmHg.")
+        elif grado_psap == "Normal":
+            agregar_conclusion(f"PSAP estimada dentro de rango no sugestivo de hipertensión pulmonar ({formato_numero(psap, 0)} mmHg).")
+
+    # ---- Válvula pulmonar ----
+    tronco_ap = obtener_numero_alias(valores_dict, "TRONCO_ARTERIA_PULMONAR")
+    tap = obtener_numero_alias(valores_dict, "TIEMPO_ACELERACION_PULMONAR", "TAP")
+    vti_ts = obtener_numero_alias(valores_dict, "VTI_TSVD", "VTI_TSVD_PULMONAR")
+    rvp = obtener_numero_alias(valores_dict, "RESISTENCIA_VASCULAR_PULMONAR", "RVP")
+
+    agregar_valvula("estenosis_pulmonar")
+    agregar_valvula("insuf_pulmonar")
+
+    pulmonar = []
+    if tronco_ap is not None:
+        pulmonar.append(f"tronco de la arteria pulmonar de {formato_numero(tronco_ap, 0)} mm")
+    if tap is not None:
+        pulmonar.append(f"tiempo de aceleración {formato_numero(tap, 0)} ms")
+    if vti_ts is not None:
+        pulmonar.append(f"VTI TSVD {formato_numero(vti_ts, 0)} cm")
+    if rvp is not None:
+        pulmonar.append(f"RVP {formato_numero(rvp, 1)} UW")
+    if pulmonar:
+        agregar_hallazgo("Arteria pulmonar: " + "; ".join(pulmonar) + ".")
+
+    global_valv = conclusion_global_valvular(valvulas)
+    if global_valv:
+        agregar_conclusion(global_valv)
+
+    # ==================================================
+    # PERICARDIO
+    # ==================================================
+    derrame = obtener_numero_alias(valores_dict, "MAGNITUD_DERRAME_PERICARDICO")
+    pericardio = texto_cualitativo(valores_dict, "PERICARDIO")
+    taponamiento = texto_cualitativo(valores_dict, "TAPONAMIENTO")
+    if derrame is not None:
+        grado_derrame = auto.get("GRADO_DERRAME_PERICARDICO")
+        if grado_derrame == "Sin derrame":
+            agregar_hallazgo("Pericardio: sin derrame pericárdico.")
+            agregar_conclusion("Sin derrame pericárdico.")
+        else:
+            agregar_hallazgo(f"Pericardio: derrame {grado_derrame.lower()}, con magnitud máxima de {formato_numero(derrame, 0)} mm.")
+            agregar_conclusion(f"Derrame pericárdico {grado_derrame.lower()}.")
+    elif pericardio:
+        agregar_hallazgo(f"Pericardio: {pericardio}.")
+    if taponamiento:
+        agregar_hallazgo(f"Taponamiento: {taponamiento}.")
+
+    # ==================================================
+    # DATOS ADICIONALES QUE SÍ EXISTAN
+    # ==================================================
+    raiz_aorta = obtener_numero_alias(valores_dict, "RAIZ_AORTICA")
+    aorta_asc = obtener_numero_alias(valores_dict, "AORTA_ASCENDENTE")
+    arco = obtener_numero_alias(valores_dict, "ARCO_AORTICO")
+    septum = obtener_numero_alias(valores_dict, "SEPTUM")
+    pp = obtener_numero_alias(valores_dict, "P_Posterior", "PARED_POSTERIOR")
+    vfd = obtener_numero_alias(valores_dict, "VFD", "VOLUMEN_FIN_DIASTOLE")
+    vfs = obtener_numero_alias(valores_dict, "VFS", "VOLUMEN_FIN_SISTOLE")
+    vs = obtener_numero_alias(valores_dict, "VOLUMEN_LATIDO", "VOL_LATIDO")
+    vsi = obtener_numero_alias(valores_dict, "VOLUMEN_LATIDO_INDEXADO", "VS_INDEX")
+
+    aorta_extra = []
+    if raiz_aorta is not None:
+        aorta_extra.append(f"raíz aórtica {formato_numero(raiz_aorta, 0)} mm")
+    if aorta_asc is not None:
+        aorta_extra.append(f"aorta ascendente {formato_numero(aorta_asc, 0)} mm")
+    if arco is not None:
+        aorta_extra.append(f"arco aórtico {formato_numero(arco, 0)} mm")
+    if aorta_extra:
+        agregar_hallazgo("Aorta: " + "; ".join(aorta_extra) + ".")
+
+    if septum is not None or pp is not None:
+        partes = []
+        if septum is not None:
+            partes.append(f"septum {formato_numero(septum, 0)} mm")
+        if pp is not None:
+            partes.append(f"pared posterior {formato_numero(pp, 0)} mm")
+        agregar_hallazgo("Grosor parietal del VI: " + "; ".join(partes) + ".")
+
+    if vfd is not None or vfs is not None or vs is not None or vsi is not None:
+        partes = []
+        if vfd is not None:
+            partes.append(f"VFD {formato_numero(vfd, 0)} mL")
+        if vfs is not None:
+            partes.append(f"VFS {formato_numero(vfs, 0)} mL")
+        if vs is not None:
+            partes.append(f"volumen latido {formato_numero(vs, 0)} mL")
+        if vsi is not None:
+            partes.append(f"volumen latido indexado {formato_numero(vsi, 0)} mL/m²")
+        agregar_hallazgo("Volúmenes ventriculares: " + "; ".join(partes) + ".")
+
+    # Si no se ingresó absolutamente nada, no inventar un informe.
+    if not hallazgos:
+        hallazgos = ["No se han ingresado mediciones suficientes para generar hallazgos automáticos."]
+    if not conclusiones:
+        conclusiones = ["No se han ingresado datos suficientes para generar conclusiones automáticas."]
+
+    return "\n\n".join(hallazgos), "\n".join(f"{i}.- {c}" for i, c in enumerate(conclusiones, 1))
+
+
+def _grado_integrado_aortico(auto):
+    """Integra Vmax, gradiente, AVA e IVD sin inventar datos faltantes."""
+    grados = [
+        auto.get("GRADO_ESTENOSIS_AO_VPEAK"),
+        auto.get("GRADO_ESTENOSIS_AO_GDTE"),
+        auto.get("GRADO_ESTENOSIS_AO_AVAO"),
+        auto.get("GRADO_ESTENOSIS_AO_IVD"),
+    ]
+    grados = [g for g in grados if g]
+    if not grados:
+        return None
+    # Si existe evidencia severa, se informa severidad; si solo hay datos
+    # intermedios se evita sobreinterpretar.
+    if grados.count("Severa") >= 2:
+        return "Severa"
+    if "Severa" in grados and len(grados) == 1:
+        return "Severa"
+    if "Moderada" in grados:
+        return "Moderada"
+    if "Leve" in grados or "Normal/Leve" in grados:
+        return "Leve"
+    return None
+
+
+def _grado_estenosis_mitral_integrado(auto):
+    grados = [auto.get("GRADO_ESTENOSIS_MITRAL_AREA"), auto.get("GRADO_ESTENOSIS_MITRAL_GDTE")]
+    grados = [g for g in grados if g and g != "Normal"]
+    if not grados:
+        return "Normal" if auto.get("GRADO_ESTENOSIS_MITRAL_AREA") == "Normal" or auto.get("GRADO_ESTENOSIS_MITRAL_GDTE") == "Normal" else None
+    if "Severa" in grados:
+        return "Severa"
+    if "Moderada" in grados:
+        return "Moderada"
+    return "Leve"
+
+
+def _grado_rm_integrado(auto):
+    grados = [auto.get("GRADO_RM_VC"), auto.get("GRADO_RM_EROA"), auto.get("GRADO_RM_VOL")]
+    grados = [g for g in grados if g]
+    if not grados:
+        return None
+    if "Severa" in grados:
+        return "Severa"
+    if "Moderada" in grados:
+        return "Moderada"
+    return "Leve"
+
+
 with tabs[-1]:
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### 📝 Redacción del Informe Clínico")
 
-    valores_reales = {k.replace("var_", ""): v for k, v in st.session_state.items() if k.startswith("var_")}
+    valores_reales = obtener_valores_reales()
+    sexo_paciente = st.session_state.get("paciente_existente_sexo") or st.session_state.get("sexo_input", "")
+    texto_automatico_findings, texto_automatico_conclusiones = construir_informe_automatico(valores_reales, sexo_paciente)
 
-    fevi_val = valores_reales.get("FEVI", "")
-    tapse_val = valores_reales.get("TAPSE", "")
-    gpr_val = valores_reales.get("GPR", "")
-    onda_s_val = valores_reales.get("ONDA_S", "") or valores_reales.get("ONDA S", "")
+    # Session State evita que Streamlit borre las modificaciones manuales
+    # del médico cada vez que se produce un rerun.
+    if "hallazgos_editables" not in st.session_state:
+        st.session_state["hallazgos_editables"] = st.session_state["borrador_estudio"].get("hallazgos_editables", texto_automatico_findings)
+    if "conclusiones_editables" not in st.session_state:
+        st.session_state["conclusiones_editables"] = st.session_state["borrador_estudio"].get("conclusiones_editables", texto_automatico_conclusiones)
 
-    fevi_str = fevi_val if fevi_val else "___"
-    tapse_str = tapse_val if tapse_val else "___"
-    gpr_str = gpr_val if gpr_val else "___"
-    onda_s_str = onda_s_val if onda_s_val else "___"
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("↻ Regenerar informe automático", use_container_width=True):
+            st.session_state["hallazgos_editables"] = texto_automatico_findings
+            st.session_state["conclusiones_editables"] = texto_automatico_conclusiones
+            st.rerun()
+    with c2:
+        st.caption("El informe se genera solo con variables ingresadas. Los campos faltantes no se interpretan como normales.")
 
-    plantilla_hallazgos = f"""Ventrículo izquierdo: Cavidad de diámetros conservados y paredes con hipertrofia ligera simétrica y concéntrica con GPR de {gpr_str}. Motilidad global y segmentaria normal con FE estimada por 2D del {fevi_str}%. Patrón de llenado diastólico anormal tipo II con aumento de las presiones de fin de diástole. Onda e' (promedio) de 3 cm/seg con E/e' de 27,0.
-
-Ventrículo derecho: Cavidad de tamaño normal. Tapse de {tapse_str} mm y onda S' de {onda_s_str} cm/seg. Vena cava inferior no dilatada con colapso inspiratorio mayor al 50%.
-
-Aurículas y septum: Aurícula izquierda: Moderadamente dilatada. Aurícula Derecha: De tamaño normal. Septum interatrial indemne.
-
-Aorta y V. Aorta: Tres velos de aspecto escleróticos sin gradiente significativo con insuficiencia mínima al Doppler color.
-
-Válvula mitral: De aspecto y movilidad normal, sin gradiente patológico con insuficiencia ligera al Doppler color.
-
-Válvula tricúspide: Velos de aspecto normal con insuficiencia leve a moderada que permite estimar por Doppler una baja probabilidad de hipertensión pulmonar.
-
-Pericardio: Sin derrame.
-
-Otros: Válvula pulmonar de aspecto normal sin gradiente o insuficiencia significativa."""
-
-    plantilla_conclusiones = f"""1.- Ventrículo izquierdo de tamaño normal y paredes con hipertrofia ligera simétrica y concéntrica. Motilidad global y segmentaria normal con FE estimada por 2D del {fevi_str}%.
-2.- Patrón de llenado diastólico anormal tipo II con aumento de las presiones de fin de diástole.
-3.- Dilatación moderada de la aurícula izquierda.
-4.- Insuficiencia mitral ligera.
-5.- Insuficiencia tricuspídea ligera a moderada que permite estimar por Doppler una baja probabilidad de HTP."""
-
-    if fevi_val or tapse_val or gpr_val:
-        texto_automatico_findings = plantilla_hallazgos
-        texto_automatico_conclusiones = plantilla_conclusiones
-    else:
-        texto_automatico_findings = ""
-        texto_automatico_conclusiones = ""
-
-    findings_editado = st.text_area("Hallazgos / Descripción (modificable)", value=texto_automatico_findings, height=300)
-    conclusiones_editadas = st.text_area("Conclusiones (modificable)", value=texto_automatico_conclusiones, height=180)
+    findings_editado = st.text_area(
+        "Hallazgos / Descripción (modificable)",
+        key="hallazgos_editables",
+        height=350
+    )
+    conclusiones_editadas = st.text_area(
+        "Conclusiones (modificable)",
+        key="conclusiones_editables",
+        height=220
+    )
+    st.session_state["borrador_estudio"]["hallazgos_editables"] = st.session_state.get("hallazgos_editables", "")
+    st.session_state["borrador_estudio"]["conclusiones_editables"] = st.session_state.get("conclusiones_editables", "")
 
 
 # ==================================================
@@ -1062,95 +1894,207 @@ for codigo, valor in valores.items():
     var = variables_por_codigo.get(codigo)
     if not var: continue
     m = _MedSimulada()
-    if var.tipo == "numero":
-        try: m.valor_num, m.valor_texto = float(valor), None
-        except ValueError: continue
-    else: m.valor_num, m.valor_texto = None, str(valor)
+    if not asignar_valor_medicion(m, var, valor):
+        continue  # dato inválido: no se incluye en el PDF
     m.codigo_variable = codigo
     mediciones_pdf.append((m, var))
 
 st.divider()
 
 # Solo generar y permitir descarga de PDF si hay un paciente seleccionado
+# ==================================================
+# PDF: generar una sola vez y conservarlo en memoria
+# para poder guardarlo junto al estudio.
+# ==================================================
+pdf_data = None
+pdf_nombre_archivo = None
+
 if paciente_existente:
-    pdf_data = generar_pdf_desde_historial(est_sim, paciente_existente, mediciones_pdf)
+    imagenes_bytes = (
+        [datos for _, datos in imagenes_normalizadas] or None
+    )
+    pdf_data = generar_pdf_desde_historial(
+        est_sim,
+        paciente_existente,
+        mediciones_pdf,
+        imagenes=imagenes_bytes,
+    )
+
+    pdf_nombre_archivo = (
+        f"Informe_Ecocardiograma_"
+        f"{rut.strip().replace('.', '').replace('-', '')}_"
+        f"{fecha_estudio.strftime('%Y%m%d')}.pdf"
+    )
+
     st.download_button(
-        label="📥 Generar e Imprimir PDF del Informe", 
-        data=pdf_data, 
-        file_name=f"Informe_Ecocardiograma_{rut.strip().replace('.','').replace('-','')}.pdf", 
-        mime="application/pdf"
+        label="📥 Generar e Imprimir PDF del Informe",
+        data=pdf_data,
+        file_name=pdf_nombre_archivo,
+        mime="application/pdf",
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-if st.button("💾 Guardar Estudio", type="primary"):
-    
-    # 1. PRIMERO: Validaciones (si algo falla aquí, st.stop() detiene el proceso)
+# Snapshot final de seguridad: temporal, sin escribir en PostgreSQL.
+if st.session_state.get("paciente_estudio_activo"):
+    _guardar_snapshot_paciente_actual()
+
+# ==================================================
+# GUARDADO DEFINITIVO DEL INFORME
+# ==================================================
+def _str_to_float_guardado(val):
+    try:
+        return float(str(val).replace(",", ".")) if val not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _str_to_int_guardado(val):
+    """Acepta "120" o "120,0"; rechaza "120,5" (no es entero)."""
+    numero = convertir_numero(val)
+    if numero is None:
+        return None
+    if isinstance(numero, float):
+        return int(numero) if numero.is_integer() else None
+    return numero
+
+
+def guardar_informe_definitivo():
+    """Guarda el informe en BD solo cuando el usuario decide finalizarlo."""
     if not rut or not paciente_existente:
-        st.error("❌ Debe buscar y seleccionar un paciente existente antes de guardar el estudio.")
-        st.stop()
+        st.error("❌ Debe buscar y seleccionar un paciente existente antes de guardar el informe.")
+        return False
 
     for codigo, valor in valores.items():
         variable = variables_por_codigo[codigo]
         if variable.obligatoria == "SI" and str(valor).strip() == "":
             st.error(f"❌ Debe completar: {variable.nombre}")
-            st.stop()
+            return False
 
-    # 2. SEGUNDO: Intentar guardar en la Base de Datos
+    # Ningún dato con formato incorrecto llega a la base de datos.
+    invalidas = []
+    for key_general in CAMPOS_GENERALES:
+        _, error = validar_campo_general(key_general)
+        if error:
+            invalidas.append(error)
+
+    for codigo, valor in valores.items():
+        if valor is None or str(valor).strip() == "":
+            continue
+        variable = variables_por_codigo[codigo]
+        if tipo_variable(variable) == "numero" and convertir_numero(valor) is None:
+            invalidas.append(f"{variable.nombre}: «{valor}» no es un número")
+        elif tipo_variable(variable) == "categoria" and convertir_categoria(valor, variable.opciones) is None:
+            invalidas.append(f"{variable.nombre}: «{valor}» no es una opción válida")
+    if invalidas:
+        st.error("❌ Corrija estos datos antes de guardar:\n\n- " + "\n- ".join(invalidas))
+        return False
+
     session = SessionLocal()
     try:
-        def str_to_float(val):
-            try: return float(val.replace(",", ".")) if val else None
-            except ValueError: return None
-        def str_to_int(val):
-            try: return int(val) if val else None
-            except ValueError: return None
-
         estudio = Estudio(
-            paciente_rut=rut.strip(), fecha_estudio=fecha_estudio, tipo_estudio=tipo_estudio, medico=medico, 
-            diagnostico=diagnostico, procedencia=procedencia, ficha_clinica=ficha_clinica,
-            peso=str_to_float(peso), talla=str_to_float(talla), asc_valor=str_to_float(st.session_state.asc_val),
-            imc=str_to_float(st.session_state.imc_val),
-            pas=str_to_int(pas), pad=str_to_int(pad), ritmo=ritmo, fcia=str_to_int(fcia),
-            observaciones=(f"{observaciones}\n\n[HALLAZGOS]:\n{findings_editado}\n\n[CONCLUSIONES]:\n{conclusiones_editadas}")
+            paciente_rut=rut.strip(),
+            fecha_estudio=fecha_estudio,
+            tipo_estudio=tipo_estudio,
+            medico=medico,
+            diagnostico=diagnostico,
+            procedencia=procedencia,
+            ficha_clinica=ficha_clinica,
+            peso=_str_to_float_guardado(peso),
+            talla=_str_to_float_guardado(talla),
+            asc_valor=_str_to_float_guardado(st.session_state.asc_val),
+            imc=_str_to_float_guardado(st.session_state.imc_val),
+            pas=_str_to_int_guardado(pas),
+            pad=_str_to_int_guardado(pad),
+            ritmo=ritmo,
+            fcia=_str_to_int_guardado(fcia),
+            observaciones=(
+                f"{observaciones}\n\n[HALLAZGOS]:\n{findings_editado}"
+                f"\n\n[CONCLUSIONES]:\n{conclusiones_editadas}"
+            ),
         )
         session.add(estudio)
         session.flush()
+
+        if pdf_data is not None and hasattr(estudio, "pdf_original"):
+            estudio.pdf_original = pdf_data
+        if pdf_nombre_archivo and hasattr(estudio, "pdf_nombre_archivo"):
+            estudio.pdf_nombre_archivo = pdf_nombre_archivo
 
         for cod, var_obj in variables_por_codigo.items():
             val_ingresado = valores.get(cod)
             if not val_ingresado or str(val_ingresado).strip() == "":
                 continue
-            
-            med = Medicion(estudio_id=estudio.id, codigo_variable=cod)
-            if var_obj.tipo == "numero":
-                try:
-                    med.valor_num = float(val_ingresado)
-                except ValueError:
-                    pass 
-            else:
-                med.valor_texto = str(val_ingresado)
+
+            med = Medicion(
+                estudio_id=estudio.id,
+                variable_id=var_obj.id,
+                codigo_variable=cod,
+            )
+            if not asignar_valor_medicion(med, var_obj, val_ingresado):
+                continue  # ya validado arriba; esto es solo una protección extra
             session.add(med)
 
-        session.commit() # Si llegamos aquí, se guardó todo en la BD con éxito
-        
-        # 3. TERCERO: Guardar el médico temporal en session_state
-        if medico_seleccionado == "Otro..." and medico.strip() != "":
-            medico_limpio = medico.strip()
-            if medico_limpio not in st.session_state["lista_medicos_bd"]:
-                st.session_state["lista_medicos_bd"].append(medico_limpio)
+        session.commit()
 
-        # 4. CUARTO: Mensajes de éxito
-        st.success("✅ Estudio guardado exitosamente.")
+        # El informe ya terminó. Se elimina SOLO el borrador de este paciente.
+        # Los borradores temporales de otros pacientes siguen disponibles en la sesión.
+        if rut in st.session_state.get("borradores_estudios", {}):
+            st.session_state["borradores_estudios"].pop(rut, None)
+        st.session_state["borrador_estudio"] = {}
+        st.session_state.pop("paciente_estudio_activo", None)
+        st.session_state.pop("selectbox_todos_estudios", None)
+        _limpiar_widgets_estudio()
+
+        st.success("✅ Informe guardado correctamente. Puede comenzar un nuevo estudio.")
         st.balloons()
-        
-        # Nota sobre st.rerun(): Si usas st.rerun() inmediatamente, los globos no se verán 
-        # porque la página se recarga al instante. Si quieres limpiar el formulario, 
-        # puedes usar time.sleep(2) antes del st.rerun() o simplemente dejar que el usuario 
-        # navegue de forma natural tras el éxito.
-        
+        return True
+
     except Exception as e:
         session.rollback()
-        st.error(f"❌ Error al guardar en la base de datos: {e}")
+        st.error(f"❌ Error al guardar el informe en la base de datos: {e}")
+        return False
     finally:
         session.close()
+
+
+if st.button("💾 Guardar informe", type="primary"):
+    guardar_informe_definitivo()
+
+
+# ==================================================
+# AVISO DE 10 MINUTOS: SOLO ADVERTENCIA, NO GUARDA EN BD
+# ==================================================
+if "inicio_edicion_estudio" not in st.session_state:
+    st.session_state["inicio_edicion_estudio"] = datetime.now()
+
+if hasattr(st, "dialog"):
+    @st.dialog("Advertencia de guardado")
+    def mostrar_aviso_guardado():
+        st.warning(
+            "Han pasado 10 minutos desde que comenzó la edición. "
+            "Los datos siguen en edición temporal y todavía no se han guardado en la base de datos. "
+            "Recuerde guardar el informe cuando termine."
+        )
+        if st.button("Continuar editando", type="primary", key="continuar_sin_guardar"):
+            st.session_state["inicio_edicion_estudio"] = datetime.now()
+            st.rerun()
+
+
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="10m")
+    def aviso_automatico_guardado():
+        if not paciente_existente or not rut or not st.session_state.get("borrador_estudio"):
+            return
+        inicio = st.session_state.get("inicio_edicion_estudio")
+        if inicio is None:
+            st.session_state["inicio_edicion_estudio"] = datetime.now()
+            return
+        if (datetime.now() - inicio).total_seconds() >= 600:
+            # Autoguardado temporal: conserva el trabajo en memoria, no en BD.
+            _guardar_snapshot_paciente_actual()
+            st.session_state["inicio_edicion_estudio"] = datetime.now()
+            mostrar_aviso_guardado()
+
+    aviso_automatico_guardado()
+
