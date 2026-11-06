@@ -1,6 +1,6 @@
 # Archivo: database/database.py
 import streamlit as st
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from database.models import Base, Rol
 
@@ -25,6 +25,16 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 4. Asegurar que las tablas existan en Neon
 Base.metadata.create_all(bind=engine)
+
+# 4b. Migración: create_all() NO agrega columnas a tablas que ya existen,
+#     por eso se agrega aquí la columna de enteros si aún no está.
+try:
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE mediciones ADD COLUMN IF NOT EXISTS valor_entero INTEGER"
+        ))
+except Exception as e:
+    print(f"Aviso al migrar la tabla mediciones: {e}")
 
 # =========================================================
 # CONFIGURACIÓN INICIAL DE ROLES (No es información sensible)

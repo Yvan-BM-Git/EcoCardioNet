@@ -35,7 +35,7 @@ def generar_menu():
 
         # Visible para todos los usuarios autenticados
         st.page_link("app.py", label="Inicio", icon="🏠")
-        st.page_link("pages/pacientes.py", label="Pacientes", icon="🧑‍⚕️")
+        # st.page_link("pages/pacientes.py", label="Pacientes", icon="🧑‍⚕️")
         st.page_link("pages/estudios.py", label="Estudios", icon="🩺")
         st.page_link("pages/historial.py", label="Historial", icon="📁")
 
