@@ -7,14 +7,18 @@ perezoso. La creación de tablas, las migraciones de columnas y los
 roles del sistema se ejecutan en init_db(), que se llama una sola vez
 por proceso a través de asegurar_bd() al inicio de cada página.
 """
+import os
+
 import streamlit as st
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from database.models import Base, Rol
 
-# 1. Obtener la URL desde los secretos de Streamlit (Protegido en la nube)
-DATABASE_URL = st.secrets["DATABASE_URL"]
+# 1. Obtener la URL desde los secretos de Streamlit (Protegido en la nube).
+#    ECOCARDIONET_DATABASE_URL tiene prioridad: la usan las pruebas (tests/)
+#    para trabajar sobre una base SQLite temporal y nunca tocar Neon.
+DATABASE_URL = os.environ.get("ECOCARDIONET_DATABASE_URL") or st.secrets["DATABASE_URL"]
 
 # Corrección obligatoria si la URL llegase a empezar con postgres://
 if DATABASE_URL.startswith("postgres://"):
@@ -46,6 +50,7 @@ COLUMNAS_MIGRADAS = [
     ("mediciones", "valor_entero", "INTEGER"),
     ("variables", "valor_minimo", "DOUBLE PRECISION" if ES_POSTGRES else "REAL"),
     ("variables", "valor_maximo", "DOUBLE PRECISION" if ES_POSTGRES else "REAL"),
+    ("estudios", "destino", "VARCHAR"),
 ]
 
 

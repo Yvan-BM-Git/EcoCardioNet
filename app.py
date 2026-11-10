@@ -1,20 +1,19 @@
 # Archivo principal: app.py
 import streamlit as st
-from datetime import datetime
-from sqlalchemy import func
+from datetime import date
 from werkzeug.security import check_password_hash
 from database.database import SessionLocal, asegurar_bd
-from database.models import Usuario, Rol, Paciente, Estudio
+from database.models import Usuario, Rol
 from menu import generar_menu
 from utils.login_ui import mostrar_login
+from utils.indicadores import mostrar_resumen
+from utils import legal
 
 st.set_page_config(page_title="EcoCardioNet", page_icon="🫀", layout="wide")
 asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
-if "vista_actual" not in st.session_state:
-    st.session_state["vista_actual"] = "login"
 
 generar_menu()
 
@@ -40,8 +39,21 @@ def autenticar(rut: str, password: str):
         session.close()
 
 
+# Aceptación de Términos y Política (Ley 21.719): entre el login y la app.
+if not st.session_state["autenticado"] and st.session_state.get("usuario_pendiente"):
+    pendiente = st.session_state["usuario_pendiente"]
+    respuesta = legal.pantalla_aceptacion(pendiente, st.session_state.get("legal_faltan", []))
+    if respuesta == "aceptado":
+        legal.registrar(pendiente["rut"], st.session_state.get("legal_faltan", []))
+        st.session_state["autenticado"] = True
+        st.session_state["usuario_actual"] = pendiente
+    if respuesta:
+        st.session_state.pop("usuario_pendiente", None)
+        st.session_state.pop("legal_faltan", None)
+        st.rerun()
+    st.stop()
+
 if not st.session_state["autenticado"]:
-    st.session_state["vista_actual"] = "login"
     envio = mostrar_login(
         rut_previo=st.session_state.get("login_rut_previo", ""),
         error=st.session_state.get("login_error"),
@@ -53,10 +65,15 @@ if not st.session_state["autenticado"]:
         else:
             usuario, error = autenticar(rut, password)
             if usuario:
-                st.session_state["autenticado"] = True
-                st.session_state["usuario_actual"] = usuario
                 st.session_state.pop("login_error", None)
                 st.session_state.pop("login_rut_previo", None)
+                faltan = legal.pendientes(usuario["rut"])
+                if faltan:
+                    st.session_state["usuario_pendiente"] = usuario
+                    st.session_state["legal_faltan"] = faltan
+                else:
+                    st.session_state["autenticado"] = True
+                    st.session_state["usuario_actual"] = usuario
             else:
                 st.session_state["login_error"] = error
                 st.session_state["login_rut_previo"] = rut
@@ -67,88 +84,33 @@ if not st.session_state["autenticado"]:
 # ==========================================
 # 2. PANEL DE CONTROL (Si SÍ está autenticado)
 # ==========================================
-session = SessionLocal()
-try:
-    hoy = datetime.now()
-    total_pacientes = session.query(Paciente).count()
-    total_estudios = session.query(Estudio).count()
-
-    inicio_mes = datetime(hoy.year, hoy.month, 1)
-    estudios_este_mes = session.query(Estudio).filter(
-        Estudio.fecha_creacion >= inicio_mes
-    ).count()
-
-    medicos_activos = session.query(Estudio.medico).filter(Estudio.medico.isnot(None)).distinct().count()
-
-except Exception as e:
-    st.error(f"Error al cargar las métricas: {e}")
-    total_pacientes, total_estudios, estudios_este_mes, medicos_activos = 0, 0, 0, 0
-    hoy = datetime.now()
-finally:
-    session.close()
-
+usuario_actual = st.session_state["usuario_actual"]
+rol = usuario_actual["rol"]
 
 st.title("🫀 EcoCardioNet")
 st.markdown("**Sistema integral de registro, análisis y seguimiento ecocardiográfico.**")
 st.divider()
 
 st.subheader("🚀 Accesos Rápidos")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.error("👤 **Ingresar un Paciente Nuevo**\n\nAgrega un nuevo paciente al sistema para comenzar a registrar sus estudios.")
-    st.page_link("pages/pacientes.py", label="Ir a Pacientes", icon="➕")
-with col2:
-    st.info("🩺 **Registrar un Examen**\n\nIngresa los datos de un nuevo paciente y documenta su ecocardiograma.")
+    st.info("🩺 **Registrar un Examen**\n\nIngresa los datos del paciente y documenta su ecocardiograma.")
     st.page_link("pages/estudios.py", label="Ir a Nuevo Estudio", icon="➕")
-with col3:
-    st.success("📁 **Ver Historial Clínico**\n\nBusca pacientes existentes, analiza tendencias y descarga PDFs históricos.")
+with col2:
+    st.success("📁 **Ver Historial Clínico**\n\nBusca pacientes, analiza tendencias y descarga PDFs históricos.")
     st.page_link("pages/historial.py", label="Ir a Historial", icon="🔍")
-# with col4:
-#     st.warning("📊 **Exportar Base de Datos**\n\nExporta los datos del sistema en formato PDF o Excel.")
-#     st.page_link("pages/exportar.py", label="Ir a Exportar", icon="📤")
-rol = st.session_state["usuario_actual"]["rol"]
-
-with col4:
+with col3:
     if rol in ["Administrador", "Investigador"]:
-        st.warning(
-            "📊 **Exportar Base de Datos**\n\n"
-            "Exporta los datos del sistema en formato CSV o Excel."
-        )
-        st.page_link(
-            "pages/exportar.py",
-            label="Ir a Exportar",
-            icon="📤"
-        )
+        st.warning("📊 **Exportar Base de Datos**\n\nDescarga los datos anonimizados en CSV o Excel.")
+        st.page_link("pages/exportar.py", label="Ir a Exportar", icon="📤")
     else:
-        st.success(
-            "🔒 **Acceso Clínico**\n\n"
-            "Su perfil está habilitado para el registro y consulta de estudios."
-        )
+        st.success("🔒 **Acceso Clínico**\n\nSu perfil está habilitado para el registro y consulta de estudios.")
 
 st.divider()
 
 st.subheader("📈 Resumen del Sistema")
-m1, m2, m3, m4 = st.columns(4)
+mostrar_resumen(usuario_actual.get("nombre"))
 
-m1.metric(
-    label="Pacientes Registrados",
-    value=f"{total_pacientes:,}".replace(",", ".")
-)
-m2.metric(
-    label="Estudios Realizados",
-    value=f"{total_estudios:,}".replace(",", "."),
-    delta=f"{estudios_este_mes} este mes",
-    delta_color="normal"
-)
-m3.metric(
-    label="Informes Generados",
-    value=f"{total_estudios:,}".replace(",", ".")
-)
-m4.metric(
-    label="Médicos Activos",
-    value=medicos_activos
-)
-
-st.markdown("<br><br>", unsafe_allow_html=True)
-st.caption(f"© {hoy.year} EcoCardioNet - Sesión iniciada como: {st.session_state['usuario_actual']['nombre']}")
+st.markdown("<br>", unsafe_allow_html=True)
+st.caption(f"© {date.today().year} EcoCardioNet · Sesión iniciada como: {usuario_actual['nombre']}")

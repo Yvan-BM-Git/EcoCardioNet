@@ -405,15 +405,18 @@ def _evaluar_protesis(posicion: str, protesis: str, criterios, params: str, clav
     sig = [e for e, n in criterios if n == 2]
     normales = [e for e, n in criterios if n == 0]
     dvi_normal = any(e.startswith("DVI") and n == 0 for e, n in criterios)
-    if peor == 2 and dvi_normal:
+    if peor >= 1 and dvi_normal:
         # Algoritmo ASE: gradiente alto con DVI ≥0,30 apunta a alto flujo o
         # desproporción prótesis-paciente, no a obstrucción de la prótesis.
-        texto = (f"{nombre_pos} con gradientes elevados [{', '.join(sig)}] y DVI normal{params}: "
+        elevados = [e for e, n in criterios if n >= 1]
+        # ASE 2009 (fig. 9): con DVI ≥0,30 el gradiente alto o intermedio no indica
+        # obstrucción (antes, con gradientes intermedios, se informaba "posible estenosis").
+        texto = (f"{nombre_pos} con gradientes elevados [{', '.join(elevados)}] y DVI normal{params}: "
                  "patrón sugerente de estado de alto flujo o desproporción prótesis-paciente más que de "
                  "obstrucción. Evaluar tiempo de aceleración, área efectiva indexada y comparar con el estudio basal.")
         return _resultado(clave, cat, nombre, "protesis_alto_gradiente", texto,
                           f"{nombre_pos} con gradientes elevados y DVI normal: sugiere alto flujo o desproporción "
-                          "prótesis-paciente; comparar con estudio basal.", 2)
+                          "prótesis-paciente; comparar con estudio basal.", peor)
     if peor == 2:
         texto = (f"{nombre_pos} con parámetros sugerentes de obstrucción significativa{params} "
                  f"[{', '.join(sig)}]. Comparar con el gradiente basal posimplante y descartar "

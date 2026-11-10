@@ -24,7 +24,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from utils.valvulopatias import evaluar_valvulopatias, conclusion_global_valvular
@@ -38,11 +38,11 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
     Paragraph,
+    KeepTogether,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    KeepTogether,
     Image as RLImage,
 )
 
@@ -418,483 +418,17 @@ def interpretar_psap(psap: Optional[float]) -> Optional[Dict[str, str]]:
 # ESTENOSIS AÓRTICA
 # ============================================================
 
-def interpretar_estenosis_aortica(
-    vmax: Optional[float],
-    gradiente: Optional[float],
-    ava: Optional[float],
-    ava_index: Optional[float],
-    ivd: Optional[float],
-    vti_tsvl: Optional[float] = None,
-    vti_ao: Optional[float] = None,
-    vs_index: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    """Evaluación multiparamétrica de estenosis aórtica.
-
-    No etiqueta gravedad con un único parámetro cuando existe discordancia.
-    Los criterios de EA grave de alto gradiente son Vmax >=4 m/s, gradiente
-    medio >=40 mmHg y AVA <=1,0 cm² (o AVAi <=0,6 cm²/m²).
-    """
-    presentes = [v for v in (vmax, gradiente, ava, ava_index, ivd) if v is not None]
-    if not presentes:
-        return None
-
-    severos = 0
-    moderados = 0
-    leves = 0
-    no_significativos = 0
-
-    if vmax is not None:
-        if vmax >= 4.0: severos += 1
-        elif vmax >= 3.0: moderados += 1
-        elif vmax >= 2.0: leves += 1
-        else: no_significativos += 1
-    if gradiente is not None:
-        if gradiente >= 40: severos += 1
-        elif gradiente >= 20: moderados += 1
-        else: no_significativos += 1
-    if ava is not None:
-        if ava <= 1.0: severos += 1
-        elif ava <= 1.5: moderados += 1
-        else: no_significativos += 1
-    if ava_index is not None:
-        if ava_index <= 0.60: severos += 1
-        elif ava_index <= 0.85: moderados += 1
-        else: no_significativos += 1
-    if ivd is not None:
-        if ivd <= 0.25: severos += 1
-        elif ivd <= 0.50: moderados += 1
-        else: no_significativos += 1
-
-    alto_gradiente_severo = (
-        (vmax is not None and vmax >= 4.0)
-        or (gradiente is not None and gradiente >= 40)
-    ) and (ava is not None and ava <= 1.0)
-
-    if alto_gradiente_severo:
-        return {
-            "estado": "severa",
-            "texto": "Parámetros ecocardiográficos compatibles con estenosis aórtica severa de alto gradiente.",
-            "conclusion": "Estenosis aórtica severa según evaluación multiparamétrica (Vmax/gradiente y área valvular).",
-            "discordante": False,
-        }
-
-    # Área severamente reducida con gradiente bajo: requiere contexto de flujo y FEVI.
-    if ava is not None and ava <= 1.0 and (gradiente is None or gradiente < 40):
-        flujo = f", con volumen sistólico indexado de {_fmt(vs_index, 0)} mL/m²" if vs_index is not None else ""
-        return {
-            "estado": "discordante",
-            "texto": "Área valvular aórtica en rango severo con gradiente no severo; hallazgos discordantes" + flujo + ". Se requiere correlación con flujo, FEVI y revisión de las mediciones.",
-            "conclusion": "Estenosis aórtica con parámetros discordantes; no establecer severidad definitiva solo con estos datos.",
-            "discordante": True,
-        }
-
-    if moderados >= 2 and (vmax is None or vmax >= 3.0 or gradiente is None or gradiente >= 20):
-        return {
-            "estado": "moderada",
-            "texto": "Parámetros compatibles con estenosis aórtica moderada.",
-            "conclusion": "Estenosis aórtica moderada según los parámetros disponibles.",
-            "discordante": False,
-        }
-
-    if leves >= 1 and severos == 0 and moderados <= 1:
-        return {
-            "estado": "leve",
-            "texto": "Parámetros compatibles con estenosis aórtica leve.",
-            "conclusion": "Estenosis aórtica leve según los parámetros disponibles.",
-            "discordante": False,
-        }
-
-    if (vmax is not None and vmax < 2.0 and (gradiente is None or gradiente < 20)
-            and (ava is None or ava > 1.5) and (ava_index is None or ava_index > 0.85)):
-        return {
-            "estado": "sin_estenosis_significativa",
-            "texto": "Sin evidencia ecocardiográfica de estenosis aórtica significativa según los parámetros disponibles.",
-            "conclusion": "Sin evidencia de estenosis aórtica significativa según los parámetros disponibles.",
-            "discordante": False,
-        }
-
-    return {
-        "estado": "no_concluyente",
-        "texto": "Parámetros de estenosis aórtica insuficientes o discordantes para establecer una severidad única.",
-        "conclusion": "Parámetros aórticos no concluyentes para establecer la severidad de una posible estenosis aórtica.",
-        "discordante": True,
-    }
 
 # ============================================================
 # INSUFICIENCIA AÓRTICA
 # ============================================================
 
-def interpretar_insuficiencia_aortica(
-    reflujo: Optional[str],
-    vc: Optional[float],
-    eroa: Optional[float],
-    thp: Optional[float],
-    volumen: Optional[float] = None,
-    fraccion: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    """Evaluación integrada de insuficiencia aórtica.
 
-    No se establece gravedad definitiva por un único dato. Los parámetros
-    cuantitativos se interpretan en conjunto y, cuando son discordantes,
-    se informa explícitamente la discordancia.
-    """
-    obs = []
-    niveles = []
-
-    if reflujo:
-        r = _normalizar_codigo(reflujo).lower()
-        if any(x in r for x in ("sin", "ausente", "no")):
-            obs.append("cualitativo_ausente")
-        elif any(x in r for x in ("severo", "severa", "grave")):
-            niveles.append(("cualitativo", 3))
-        elif "moderad" in r:
-            niveles.append(("cualitativo", 2))
-        elif "leve" in r:
-            niveles.append(("cualitativo", 1))
-
-    # Umbrales ecocardiográficos de apoyo; la interpretación final es integrada.
-    if vc is not None and vc > 0:
-        niveles.append(("vena contracta", 3 if vc >= 6 else 2 if vc >= 3 else 1))
-
-    if eroa is not None and eroa > 0:
-        niveles.append(("EROA", 3 if eroa >= 0.30 else 2 if eroa >= 0.10 else 1))
-
-    if volumen is not None and volumen > 0:
-        niveles.append(("volumen regurgitante", 3 if volumen >= 60 else 2 if volumen >= 30 else 1))
-
-    if fraccion is not None and fraccion > 0:
-        niveles.append(("fracción regurgitante", 3 if fraccion >= 50 else 2 if fraccion >= 30 else 1))
-
-    if thp is not None and thp > 0:
-        # PHT <200 ms apoya IA severa; >500 ms hace improbable IA importante.
-        niveles.append(("PHT", 3 if thp < 200 else 2 if thp < 300 else 1 if thp >= 500 else 0))
-
-    cuant = [(n, v) for n, v in niveles if v in (1, 2, 3)]
-    if not cuant:
-        if "cualitativo_ausente" in obs:
-            return {"estado": "ausente", "texto": "Sin evidencia cualitativa de insuficiencia aórtica significativa.", "conclusion": None}
-        return None
-
-    severas = [n for n, v in cuant if v == 3]
-    moderadas = [n for n, v in cuant if v == 2]
-    leves = [n for n, v in cuant if v == 1]
-
-    # Una IA severa debe tener concordancia cuantitativa suficiente.
-    if len(severas) >= 2:
-        estado = "severa"
-    elif len(severas) == 1 and len(cuant) >= 3 and len(moderadas) == 0:
-        estado = "probablemente severa"
-    elif len(moderadas) >= 2 and not severas:
-        estado = "moderada"
-    elif len(leves) >= 2 and not moderadas and not severas:
-        estado = "leve"
-    elif severas and moderadas:
-        return {
-            "estado": "discordante",
-            "texto": "Parámetros de insuficiencia aórtica discordantes: existen criterios que apuntan a mayor gravedad y otros no concordantes. Integrar cuantificación, contexto hemodinámico y remodelado ventricular.",
-            "conclusion": "Insuficiencia aórtica con parámetros discordantes; correlacionar antes de establecer la severidad definitiva.",
-            "discordante": True,
-        }
-    else:
-        return {
-            "estado": "no_concluyente",
-            "texto": "Datos insuficientes para establecer con seguridad la severidad de la insuficiencia aórtica; se requiere integración multiparamétrica.",
-            "conclusion": "Insuficiencia aórtica: severidad no concluyente con los parámetros disponibles.",
-            "discordante": True,
-        }
-
-    return {
-        "estado": estado,
-        "texto": f"Parámetros compatibles con insuficiencia aórtica {estado}, según la evaluación integrada disponible.",
-        "conclusion": f"Insuficiencia aórtica {estado} según los parámetros disponibles.",
-        "discordante": False,
-    }
-
-def interpretar_estenosis_mitral(
-    area: Optional[float],
-    gradiente: Optional[float],
-    pht: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    """Evaluación integrada de estenosis mitral.
-
-    El área mitral es el parámetro anatómico principal. El gradiente depende
-    de frecuencia cardíaca y flujo, por lo que no se usa aisladamente para
-    declarar severidad.
-    """
-    if area is None and gradiente is None and pht is None:
-        return None
-
-    criterios = []
-    if area is not None and area > 0:
-        if area <= 1.0:
-            criterios.append(("área", 3))
-        elif area <= 1.5:
-            criterios.append(("área", 2))
-        else:
-            criterios.append(("área", 1))
-
-    if gradiente is not None and gradiente >= 0:
-        if gradiente >= 10:
-            criterios.append(("gradiente", 3))
-        elif gradiente > 5:
-            criterios.append(("gradiente", 2))
-        else:
-            criterios.append(("gradiente", 1))
-
-    if pht is not None and pht > 0:
-        # PHT >150 ms apoya MVA <1.5 cm², pero tiene limitaciones.
-        if pht >= 220:
-            criterios.append(("PHT", 3))
-        elif pht > 150:
-            criterios.append(("PHT", 2))
-        else:
-            criterios.append(("PHT", 1))
-
-    if area is not None and area > 1.5 and (gradiente is None or gradiente <= 5):
-        return {"estado": "no_significativa", "texto": "Sin evidencia de estenosis mitral clínicamente significativa según los parámetros disponibles.", "conclusion": "Sin evidencia de estenosis mitral significativa según los parámetros disponibles.", "discordante": False}
-
-    sev = sum(v == 3 for _, v in criterios)
-    mod = sum(v == 2 for _, v in criterios)
-
-    if area is not None and area <= 1.5:
-        if area <= 1.0 and sev >= 2:
-            estado = "severa"
-        elif area <= 1.0 and len(criterios) == 1:
-            return {"estado": "probablemente_severa", "texto": "Área mitral en rango muy reducido, pero faltan parámetros concordantes para establecer severidad definitiva.", "conclusion": "Estenosis mitral probablemente severa; integrar con gradiente, frecuencia cardíaca y morfología.", "discordante": True}
-        elif area <= 1.5 and (mod >= 1 or sev >= 1):
-            estado = "moderada"
-        else:
-            estado = "significativa"
-    elif sev >= 2:
-        estado = "severa"
-    elif mod >= 1:
-        return {"estado": "sugestiva", "texto": "Hallazgos hemodinámicos sugestivos de estenosis mitral; el gradiente debe interpretarse según frecuencia cardíaca y flujo.", "conclusion": "Estenosis mitral sugestiva; correlacionar con área valvular y condiciones hemodinámicas.", "discordante": True}
-    else:
-        estado = "no_concluyente"
-
-    return {
-        "estado": estado,
-        "texto": f"Parámetros compatibles con estenosis mitral {estado}.",
-        "conclusion": f"Estenosis mitral {estado} según los parámetros disponibles.",
-        "discordante": estado == "no_concluyente",
-    }
 # ============================================================
 # INSUFICIENCIA MITRAL
 # ============================================================
 
-def interpretar_insuficiencia_mitral(
-    cualitativa: Optional[str],
-    vc: Optional[float],
-    eroa: Optional[float],
-    volumen: Optional[float],
-    fraccion: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    """Evaluación multiparamétrica de insuficiencia mitral.
 
-    Integra parámetros cualitativos y cuantitativos. No transforma
-    automáticamente un único parámetro intermedio en una categoría definitiva.
-    """
-    cual = None
-    if cualitativa:
-        r = _normalizar_codigo(cualitativa).lower()
-        if any(x in r for x in ("sin", "ausente", "no")):
-            cual = 0
-        elif any(x in r for x in ("severo", "severa", "grave")):
-            cual = 3
-        elif "moderad" in r:
-            cual = 2
-        elif "leve" in r:
-            cual = 1
-
-    criterios = []
-    if vc is not None and vc > 0:
-        criterios.append(("vena contracta", 3 if vc >= 7 else 2 if vc > 3 else 1))
-
-    if eroa is not None and eroa > 0:
-        criterios.append(("EROA", 3 if eroa >= 0.40 else 2 if eroa >= 0.20 else 1))
-
-    if volumen is not None and volumen > 0:
-        criterios.append(("volumen regurgitante", 3 if volumen >= 60 else 2 if volumen >= 30 else 1))
-
-    if fraccion is not None and fraccion > 0:
-        criterios.append(("fracción regurgitante", 3 if fraccion >= 50 else 2 if fraccion >= 30 else 1))
-
-    if cual is not None:
-        if cual == 0 and not criterios:
-            return {"estado": "ausente", "texto": "Sin evidencia cualitativa de insuficiencia mitral significativa.", "conclusion": None}
-        if cual > 0:
-            criterios.append(("evaluación cualitativa", cual))
-
-    if not criterios:
-        return None
-
-    sev = sum(v == 3 for _, v in criterios)
-    mod = sum(v == 2 for _, v in criterios)
-    leve = sum(v == 1 for _, v in criterios)
-
-    # Concordancia cuantitativa fuerte.
-    cuant = [v for n, v in criterios if n != "evaluación cualitativa"]
-    if sum(v == 3 for v in cuant) >= 2:
-        estado = "severa"
-    elif len(cuant) >= 2 and sum(v == 2 for v in cuant) >= 2 and sev == 0:
-        estado = "moderada"
-    elif len(cuant) == 1 and cuant[0] == 3:
-        return {"estado": "probablemente_severa", "texto": "Un parámetro cuantitativo está en rango severo, pero falta concordancia multiparamétrica.", "conclusion": "Insuficiencia mitral probablemente severa; integrar los restantes parámetros y el mecanismo de la regurgitación.", "discordante": True}
-    elif mod >= 1 and sev == 0:
-        estado = "moderada" if mod >= 2 or cual == 2 else "leve-moderada"
-    elif leve >= 2 and sev == 0 and mod == 0:
-        estado = "leve"
-    elif sev and mod:
-        return {"estado": "discordante", "texto": "Parámetros de insuficiencia mitral discordantes; integrar EROA, volumen, fracción, vena contracta y mecanismo de la lesión.", "conclusion": "Insuficiencia mitral con parámetros discordantes; correlacionar antes de establecer severidad definitiva.", "discordante": True}
-    else:
-        return {"estado": "no_concluyente", "texto": "Datos insuficientes para establecer con seguridad la severidad de la insuficiencia mitral.", "conclusion": "Insuficiencia mitral: severidad no concluyente con los parámetros disponibles.", "discordante": True}
-
-    return {"estado": estado, "texto": f"Parámetros compatibles con insuficiencia mitral {estado}.", "conclusion": f"Insuficiencia mitral {estado} según los parámetros disponibles.", "discordante": False}
-
-def interpretar_insuficiencia_tricuspidea(
-    cualitativa: Optional[str],
-    vc: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    """Evaluación integrada disponible para insuficiencia tricuspídea.
-
-    En el formulario actual se dispone principalmente de evaluación cualitativa
-    y vena contracta; por ello no se simula una cuantificación completa cuando
-    faltan PISA/EROA, volumen, flujo venoso hepático u otros criterios.
-    """
-    cual = None
-    if cualitativa:
-        r = _normalizar_codigo(cualitativa).lower()
-        if any(x in r for x in ("sin", "ausente", "no")):
-            cual = 0
-        elif any(x in r for x in ("severo", "severa", "grave")):
-            cual = 3
-        elif "moderad" in r:
-            cual = 2
-        elif "leve" in r:
-            cual = 1
-
-    if cual is None and vc is None:
-        return None
-    if cual == 0 and vc is None:
-        return {"estado": "ausente", "texto": "Sin evidencia cualitativa de insuficiencia tricuspídea significativa.", "conclusion": None}
-
-    vc_nivel = None
-    if vc is not None and vc > 0:
-        vc_nivel = 3 if vc >= 7 else 2 if vc >= 3 else 1
-
-    if cual == 3 and vc_nivel == 3:
-        estado = "severa"
-        texto = "Insuficiencia tricuspídea severa: evaluación cualitativa y vena contracta concordantes."
-    elif cual == 2 and vc_nivel == 2:
-        estado = "moderada"
-        texto = "Insuficiencia tricuspídea moderada: parámetros disponibles concordantes."
-    elif cual == 1 and (vc_nivel is None or vc_nivel == 1):
-        estado = "leve"
-        texto = "Insuficiencia tricuspídea leve según los parámetros disponibles."
-    elif vc_nivel == 3 or cual == 3:
-        estado = "probablemente_severa"
-        texto = "Hallazgos sugestivos de insuficiencia tricuspídea severa, pero falta concordancia multiparamétrica."
-    else:
-        return {"estado": "no_concluyente", "texto": "Parámetros de insuficiencia tricuspídea insuficientes o discordantes para establecer severidad definitiva.", "conclusion": "Insuficiencia tricuspídea: severidad no concluyente; integrar parámetros cualitativos y cuantitativos disponibles.", "discordante": True}
-
-    return {"estado": estado, "texto": texto, "conclusion": f"Insuficiencia tricuspídea {estado.replace('_', ' ')} según los parámetros disponibles.", "discordante": estado == "probablemente_severa"}
-
-def interpretar_estenosis_tricuspidea(
-    gradiente: Optional[float],
-    area: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    """Evaluación prudente de estenosis tricuspídea.
-
-    La TS adquirida es infrecuente y el gradiente depende de flujo y frecuencia
-    cardíaca. No se declara 'severa' con un único dato sin corroboración.
-    """
-    if gradiente is None and area is None:
-        return None
-
-    criterios = []
-    if area is not None and area > 0:
-        criterios.append(("área", 3 if area <= 1.0 else 2 if area <= 1.5 else 1))
-
-    if gradiente is not None and gradiente >= 0:
-        criterios.append(("gradiente", 3 if gradiente >= 5 else 1))
-
-    if area is not None and area > 1.5 and (gradiente is None or gradiente < 5):
-        return {"estado": "no_significativa", "texto": "Sin evidencia de estenosis tricuspídea significativa según los parámetros disponibles.", "conclusion": "Sin evidencia de estenosis tricuspídea significativa según los parámetros disponibles.", "discordante": False}
-
-    if area is not None and area <= 1.0 and gradiente is not None and gradiente >= 5:
-        return {"estado": "severa", "texto": "Área tricuspídea muy reducida con gradiente medio elevado; hallazgos concordantes con estenosis tricuspídea severa.", "conclusion": "Estenosis tricuspídea severa según los parámetros disponibles.", "discordante": False}
-
-    if area is not None and area <= 1.5 and gradiente is not None and gradiente >= 5:
-        return {"estado": "significativa", "texto": "Área tricuspídea reducida y gradiente medio elevado; hallazgos compatibles con estenosis tricuspídea significativa.", "conclusion": "Estenosis tricuspídea significativa según los parámetros disponibles.", "discordante": False}
-
-    if gradiente is not None and gradiente >= 5:
-        return {"estado": "sugestiva", "texto": "Gradiente medio tricuspídeo elevado; interpretar según frecuencia cardíaca y flujo y corroborar con anatomía/área.", "conclusion": "Hallazgos sugestivos de estenosis tricuspídea; requiere correlación multiparamétrica.", "discordante": True}
-
-    return {"estado": "no_concluyente", "texto": "Datos insuficientes para establecer la severidad de una posible estenosis tricuspídea.", "conclusion": "Estenosis tricuspídea: severidad no concluyente con los parámetros disponibles.", "discordante": True}
-
-def interpretar_estenosis_pulmonar(
-    vmax: Optional[float],
-    gradiente: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    """Evaluación integrada de estenosis pulmonar por velocidad y gradiente."""
-    if vmax is None and gradiente is None:
-        return None
-
-    niveles = []
-    if vmax is not None and vmax >= 0:
-        niveles.append(("Vmáx", 3 if vmax >= 4.0 else 2 if vmax >= 3.0 else 1 if vmax >= 2.0 else 0))
-    if gradiente is not None and gradiente >= 0:
-        niveles.append(("gradiente", 3 if gradiente >= 64 else 2 if gradiente >= 36 else 1 if gradiente >= 16 else 0))
-
-    positivos = [(n,v) for n,v in niveles if v > 0]
-    if not positivos:
-        return {"estado": "no_significativa", "texto": "Sin evidencia de estenosis pulmonar significativa según velocidad y gradiente disponibles.", "conclusion": "Sin evidencia de estenosis pulmonar significativa según los parámetros disponibles.", "discordante": False}
-
-    severos = [n for n,v in positivos if v == 3]
-    moderados = [n for n,v in positivos if v == 2]
-    leves = [n for n,v in positivos if v == 1]
-
-    if len(positivos) == 2 and len(severos) == 2:
-        estado = "severa"
-    elif len(positivos) == 2 and len(moderados) == 2:
-        estado = "moderada"
-    elif len(positivos) == 2 and len(leves) == 2:
-        estado = "leve"
-    elif len(positivos) == 2:
-        return {"estado": "discordante", "texto": "Velocidad y gradiente pulmonar no son concordantes para una única categoría de severidad.", "conclusion": "Estenosis pulmonar con parámetros discordantes; correlacionar velocidad, gradiente y contexto hemodinámico.", "discordante": True}
-    else:
-        estado = {1:"leve",2:"moderada",3:"severa"}[positivos[0][1]]
-        return {"estado": f"probablemente_{estado}", "texto": f"Un parámetro sugiere estenosis pulmonar {estado}; falta corroboración multiparamétrica.", "conclusion": f"Estenosis pulmonar probablemente {estado}; correlacionar con el otro parámetro.", "discordante": True}
-
-    return {"estado": estado, "texto": f"Velocidad y gradiente compatibles con estenosis pulmonar {estado}.", "conclusion": f"Estenosis pulmonar {estado} según los parámetros disponibles.", "discordante": False}
-
-def interpretar_insuficiencia_pulmonar(cualitativa: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Interpretación conservadora de IP con el dato que actualmente captura el formulario.
-
-    El formulario actual no aporta un conjunto cuantitativo suficiente para una
-    clasificación multiparamétrica de IP. Por eso se conserva el dato cualitativo
-    sin presentarlo como una cuantificación más precisa de la que realmente existe.
-    """
-    if not cualitativa:
-        return None
-    r = _normalizar_codigo(cualitativa).lower()
-    if any(x in r for x in ("sin", "ausente", "no")):
-        return {"estado": "ausente", "texto": "Sin evidencia cualitativa de insuficiencia pulmonar significativa.", "conclusion": None}
-    if any(x in r for x in ("severo", "severa", "grave")):
-        estado = "severa"
-    elif "moderad" in r:
-        estado = "moderada"
-    elif "leve" in r:
-        estado = "leve"
-    else:
-        return None
-
-    return {
-        "estado": estado,
-        "texto": f"Insuficiencia pulmonar {estado} según la evaluación cualitativa disponible.",
-        "conclusion": f"Insuficiencia pulmonar {estado} según el dato cualitativo disponible; la severidad debe integrarse con hallazgos morfológicos y hemodinámicos.",
-        "discordante": False,
-    }
 # ============================================================
 # DERRAME PERICÁRDICO
 # ============================================================
@@ -1876,6 +1410,7 @@ def construir_informe_automatico(
     ascendente = _num(valores, "AORTA_ASCENDENTE", "AORTA_ASC")
     arco = _num(valores, "ARCO_AORTICO", "ARCO_AO")
 
+    aorta_resultado = interpretar_aorta(raiz, ascendente, arco)
     if raiz is not None or ascendente is not None or arco is not None:
         partes = []
         if raiz is not None:
@@ -1885,15 +1420,16 @@ def construir_informe_automatico(
         if arco is not None:
             partes.append(f"arco aórtico {_fmt(arco, 0)} mm")
 
+        # Si hay dilatación, el hallazgo lo dice (antes solo listaba las cifras
+        # y la interpretación aparecía únicamente en Conclusiones).
         _agregar_unico(
             resultado.hallazgos,
-            "Aorta: " + "; ".join(partes) + ".",
+            aorta_resultado["texto"] if aorta_resultado else "Aorta: " + "; ".join(partes) + ".",
             PRIORIDADES["aorta"],
             "aorta_mediciones",
             categoria="aorta",
         )
 
-    aorta_resultado = interpretar_aorta(raiz, ascendente, arco)
     if aorta_resultado:
         prioridad = PRIORIDADES["emergencia"] if (raiz is not None and raiz >= 45) or (ascendente is not None and ascendente >= 50) else PRIORIDADES["aorta"]
         _agregar_unico(
@@ -2259,8 +1795,13 @@ def _agrupar_registros(registros: List[Dict[str, Any]]) -> List[Tuple[str, List[
     return grupos
 
 
+_SIN_UNIDAD = {"CUALITATIVO", "CUALITATIVA", "ADIMENSIONAL", "TEXTO", "-", "—"}
+
+
 def _texto_datos(registro: Dict[str, Any]) -> str:
-    unidad = registro["unidad"]
+    unidad = str(registro.get("unidad") or "").strip()
+    if _normalizar_codigo(unidad) in _SIN_UNIDAD:
+        unidad = ""
     return f"{registro['valor']} {unidad}".strip()
 
 
@@ -2334,85 +1875,6 @@ def _construir_tabla_mediciones(registros: List[Dict[str, Any]], styles: Dict[st
 # Solo estas variables se imprimen en "Mediciones ecocardiográficas
 # registradas". La interpretación automática sigue utilizando los datos
 # disponibles para no alterar el motor clínico.
-VARIABLES_VISIBLES_INFORME = {
-    "RAIZ_AORTICA", "AORTA_ASCENDENTE", "ARCO_AORTICO",
-    "RAIZ_AORTICA_ASC", "AORTA_ASCEND_ASC",
-    "DIAMETRO_AI", "VOLUMEN_AI", "VOLUMEN_INDEXADO_AI", "VOL_INDEXADO_AI",
-    "AREA_AD", "AREA_AURICULA_DERECHA", "SEPTUM", "P_POSTERIOR",
-    "DIMENSION_DIASTOLICA_VI", "DVI_DIAST", "DVID",
-    "DIMENSION_SISTOLICA_VI", "DVI_SIST", "DVIS",
-    "FRACC_ACORTAMIENTO", "PORC_ACORTAMIENTO",
-    "FEVI", "FRACCION_EYECCION", "GPR", "GPR_VI",
-    "DIAMETRO_BASAL_VD", "DIAM_BASAL_VD",
-    "DIAMETRO_MEDIO_VD", "DIAM_MEDIO_VD",
-    "TAPSE", "TAPSE_VD", "ONDA_S", "ONDA_S_PRIMA", "S_PRIMA",
-    "VENA_CAVA_INFERIOR", "VCI", "PORCENTAJE_COLAPSO_VCI",
-    "PTJE_VCI", "COLAPSO_VCI",
-    "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL",
-    "ONDA_A", "ONDA_A_MITRAL", "A_MITRAL",
-    "E_A", "RELACION_E_A", "E_PRIMA_LATERAL", "E_LATERAL",
-    "E_PRIMA_LAT", "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP",
-    "E_E_PRIMA", "E_EPRIMA", "E_E",
-    "TIEMPO_DECELERACION", "T_D", "TD",
-    "VELOCIDAD_PICO_AORTICA", "V_PEAK_AO", "V_MAX_AO",
-    "GRADIENTE_MEDIO_AORTICO", "GRADIENTE_AORTICO",
-    "VTI_AORTICA", "VTI_AO",
-    "AREA_VALVULAR_AORTICA_CONTINUIDAD", "AVA_AO_EC", "AVAO_EC",
-    "AREA_VALVULAR_AORTICA_INDEXADA", "AVA_AO_INDEX", "AVAO_INDEX",
-    "INDICE_VELOCIDAD_DOPPLER", "IVD",
-    "REFLUJO_AORTICO", "RF_AO", "VENA_CONTRACTA_AORTICA",
-    "VC_AORTICA", "THP_AORTICA", "THP", "EROA_AORTICA",
-    "VOLUMEN_REGURGITANTE_AORTICO", "VOLUMEN_REG_AORTICO", "VOL_REG_AO",
-    "FRACCION_REGURGITANTE_AORTICA", "FRACCION_REG_AORTICA", "FR_RG_AO",
-    "AREA_MITRAL", "AREA_VALVULAR_MITRAL", "AVA_MITRAL", "GRADIENTE_MEDIO_MITRAL",
-    "THP_MITRAL", "PHT_MITRAL", "TIEMPO_HEMIPRESION_MITRAL", "REFLUJO_MITRAL",
-    "VENA_CONTRACTA_MITRAL", "VC_MITRAL", "PISA_MITRAL",
-    "EROA_MITRAL", "VOLUMEN_REGURGITANTE_MITRAL",
-    "VOLUMEN_REG_MITRAL", "FRACCION_REGURGITANTE_MITRAL",
-    "FR_RG_MITRAL",
-    "VELOCIDAD_MAXIMA_IT", "VEL_MAX_IT", "V_MAX_IT",
-    "GRADIENTE_MAXIMO_IT", "GTE_MAX_IT", "GRADIENTE_MEDIO_TRICUSPIDEO", "GRADIENTE_MEDIO_IT",
-    "AREA_TRICUSPIDEA", "AREA_VALVULAR_TRICUSPIDEA", "REFLUJO_TRICUSPIDEO", "REFLUJO_TRICUSPIDE",
-    "VENA_CONTRACTA_TRICUSPIDEA", "VC_TRICUSPIDEA", "PSAP",
-    "PRESION_SISTOLICA_AP", "TCO_AP", "TCOAP",
-    "V_MAX_PULMONAR", "VMAX_PULMONAR", "VELOCIDAD_PICO_PULMONAR",
-    "GRADIENTE_MAXIMO_PULMONAR", "GRADIENTE_PULMONAR", "GDTE_PULMONAR",
-    "REFLUJO_PULMONAR", "INSUFICIENCIA_PULMONAR",
-    # Códigos reales del Excel de variables (válvulas)
-    "GRADO_REFLUJO_AORTICO", "TIEMPO_HEMIPRESION_AORTICO", "EROA_AORTICO", "PISA_AORTICO",
-    "VTI_AORTICO", "PROTESIS_AORTICA", "AREA_VALVULAR_AORTICA_ANATOMICA",
-    "VOLUMEN_LATIDO_INDEXADO_AORTICO",
-    "GRADO_REFLUJO_MITRAL", "PROTESIS_MITRAL", "SCORE_WILKINS",
-    "GRADO_REFLUJO_TRICUSPIDEO", "PISA_TRICUSPIDEO", "DIAMETRO_VCI", "PUNTAJE_COLAPSO_VCI",
-    "GRADO_REFLUJO_PULMONAR", "TRONCO_ARTERIA_PULMONAR", "TIEMPO_ACELERACION_PULMONAR",
-    "VTI_TSVD", "RESISTENCIA_VASCULAR_PULMONAR",
-    "MAGNITUD_DERRAME_PERICARDICO", "MAGNITUD_DERRAME",
-    "DERRAME_PERICARDICO",
-}
-
-NOMBRES_VISIBLES_EXTRA = {
-    "RAIZ AORTICA", "AORTA ASCENDENTE", "ARCO AORTICO",
-    "DIAMETRO AI", "VOLUMEN INDEXADO AI", "VOL. INDEXADO AI",
-    "AREA AD", "SEPTUM", "P. POSTERIOR",
-    "DIMENSION DIAST. VI.", "DIMENSION SIST. VI.", "% ACORTAMIENTO",
-    "FRAC. EYECCION", "MASA VI/ASC", "GPR",
-    "DIAM. BASAL VD", "DIAM. MEDIO VD", "TAPSE", "ONDA S",
-    "VENA CAVA INF.", "ONDA E", "ONDA A", "E/A", "E/E'",
-    "V. MAX", "GRADIENTE MEDIO", "INSUFICIENCIA", "REFLUJO",
-    "VEL. MAXIMA IT", "GDTE MAXIMA IT", "PRESION SIST. AP",
-    "TCO. AP", "DERRAME PERICARDICO",
-}
-
-def _variable_de_informe_visible(registro: Dict[str, Any]) -> bool:
-    codigo = _normalizar_codigo(registro.get("codigo", ""))
-    nombre = _normalizar_codigo(registro.get("nombre", ""))
-    visibles = {_normalizar_codigo(x) for x in VARIABLES_VISIBLES_INFORME}
-    nombres = {_normalizar_codigo(x) for x in NOMBRES_VISIBLES_EXTRA}
-    return codigo in visibles or nombre in nombres
-
-def _filtrar_registros_para_informe(registros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [r for r in registros if _variable_de_informe_visible(r)]
-
 def _obtener_dato_paciente(obj: Any, *attrs: str, default: Any = "—") -> Any:
     valor = _get_attr(obj, *attrs, default=None)
     return default if valor is None or str(valor).strip() == "" else valor
@@ -2579,6 +2041,23 @@ def _edad_en_fecha(fecha_nacimiento: Any, fecha_ref: Any) -> Any:
     return ref.year - nac.year - ((ref.month, ref.day) < (nac.month, nac.day))
 
 
+AVISO_INFORME = ("Informe generado automáticamente a partir de las mediciones ingresadas. "
+                 "Debe ser revisado y validado por el médico responsable antes de su emisión definitiva.")
+
+
+def _pie_de_pagina(canvas, doc) -> None:
+    """Aviso de validación médica y número de página al pie de cada hoja."""
+    canvas.saveState()
+    canvas.setFont("Helvetica", 6.8)
+    canvas.setFillColor(colors.grey)
+    ancho = A4[0] - doc.leftMargin - doc.rightMargin
+    canvas.line(doc.leftMargin, 1.3 * cm, doc.leftMargin + ancho, 1.3 * cm)
+    canvas.drawString(doc.leftMargin, 1.0 * cm, AVISO_INFORME[:AVISO_INFORME.index("Debe")].strip())
+    canvas.drawString(doc.leftMargin, 0.7 * cm, AVISO_INFORME[AVISO_INFORME.index("Debe"):])
+    canvas.drawRightString(doc.leftMargin + ancho, 0.7 * cm, f"Página {doc.page}")
+    canvas.restoreState()
+
+
 def generar_pdf_desde_historial(
     estudio: Any,
     paciente: Any,
@@ -2600,8 +2079,10 @@ def generar_pdf_desde_historial(
     """
 
     valores = _extraer_mediciones(mediciones_estudio)
+    # Se listan TODAS las mediciones ingresadas. Antes una lista fija de
+    # variables "visibles" ocultaba 34 de las 97 (GLS, volúmenes, LARS,
+    # TAPSE/PSAP, taponamiento...) aunque el informe las interpretara.
     registros = _obtener_registros_ordenados(mediciones_estudio)
-    registros = _filtrar_registros_para_informe(registros)
     sexo = _get_attr(paciente, "sexo", default=None)
 
     resultado = construir_informe_automatico(
@@ -2623,7 +2104,7 @@ def generar_pdf_desde_historial(
         rightMargin=1.5 * cm,
         leftMargin=1.5 * cm,
         topMargin=1.35 * cm,
-        bottomMargin=1.35 * cm,
+        bottomMargin=1.7 * cm,
         title="Informe Ecocardiográfico",
         author="EcoCardioNet",
     )
@@ -2707,7 +2188,7 @@ def generar_pdf_desde_historial(
         sc = _obtener_dato_paciente(paciente, "sc", "superficie_corporal", default=None)
     if sc in (None, "—") or str(sc).strip() == "":
         sc_calc = _calcular_sc(talla, peso)
-        sc = f"{sc_calc:.2f}" if sc_calc is not None else "—"
+        sc = sc_calc if sc_calc is not None else "—"
 
     fecha_nacimiento = _obtener_dato_paciente(
         paciente, "fecha_nacimiento", "fecha_nac", "nacimiento"
@@ -2730,6 +2211,13 @@ def generar_pdf_desde_historial(
         _get_attr(estudio, "fecha_estudio", "fecha_creacion", default=None)
     )
     fecha_nacimiento = _formatear_fecha(fecha_nacimiento)
+    pas = _obtener_dato_paciente(estudio, "pas")
+    pad = _obtener_dato_paciente(estudio, "pad")
+    imc_num = _to_float(_get_attr(estudio, "imc", "imc_valor", default=None))
+    if imc_num is None:
+        t_num, p_num = _to_float(talla), _to_float(peso)
+        imc_num = p_num / (t_num / 100) ** 2 if t_num and p_num else None
+    imc = _fmt(imc_num, 1) if imc_num else "—"
     medico = _obtener_dato_paciente(estudio, "medico")
     tipo = _obtener_dato_paciente(estudio, "tipo_estudio", default="Ecocardiograma")
 
@@ -2740,11 +2228,12 @@ def generar_pdf_desde_historial(
         ["Sexo", sexo or "—", "Fecha", fecha],
         ["Talla", f"{talla} cm" if str(talla) != "—" else "—",
          "Peso", f"{peso} kg" if str(peso) != "—" else "—"],
-        ["SC", f"{sc} m²" if str(sc) != "—" else "—", "Ritmo", ritmo],
-        ["FC", f"{fc} lpm" if str(fc) != "—" else "—", "Médico", medico],
+        ["SC", f"{_fmt(_to_float(sc), 2)} m²" if _to_float(sc) else "—", "IMC", f"{imc} kg/m²" if str(imc) != "—" else "—"],
+        ["Ritmo", ritmo, "FC", f"{fc} lpm" if str(fc) != "—" else "—"],
+        ["PA", f"{pas}/{pad} mmHg" if "—" not in (str(pas), str(pad)) else "—", "Médico", medico],
     ]
 
-    tabla = Table(datos_paciente, colWidths=[3.0 * cm, 5.0 * cm, 2.3 * cm, 5.7 * cm])
+    tabla = Table(datos_paciente, colWidths=[3.4 * cm, 4.6 * cm, 2.3 * cm, 5.7 * cm])
     tabla.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
@@ -2754,8 +2243,8 @@ def generar_pdf_desde_historial(
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
     ]))
 
     story.append(tabla)
@@ -2817,18 +2306,14 @@ def generar_pdf_desde_historial(
     # 3. CONCLUSIONES
     # ========================================================
     story.append(Spacer(1, 5))
-    story.append(Paragraph("Conclusiones", subtitulo))
-
+    # Las conclusiones van juntas: si no caben, pasan completas a la hoja siguiente
+    # (antes la última quedaba sola en otra página).
+    bloque = [Paragraph("Conclusiones", subtitulo)]
     if conclusiones_texto.strip():
-        for linea in conclusiones_texto.splitlines():
-            story.append(Paragraph(linea, conclusion_style))
+        bloque += [Paragraph(linea, conclusion_style) for linea in conclusiones_texto.splitlines()]
     else:
-        story.append(
-            Paragraph(
-                "No se generaron conclusiones automáticas con los datos disponibles.",
-                normal,
-            )
-        )
+        bloque.append(Paragraph("No se generaron conclusiones automáticas con los datos disponibles.", normal))
+    story.append(KeepTogether(bloque))
 
     if resultado.alertas:
         story.append(Spacer(1, 7))
@@ -2836,14 +2321,7 @@ def generar_pdf_desde_historial(
         for alerta in resultado.alertas:
             story.append(Paragraph("• " + alerta, alerta_style))
 
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(
-        "Informe generado automáticamente a partir de las mediciones ingresadas. "
-        "Debe ser revisado y validado por el médico responsable antes de su emisión definitiva.",
-        ParagraphStyle("NotaEcoV2", parent=normal, fontSize=7.5, leading=10),
-    ))
-
-    doc.build(story)
+    doc.build(story, onFirstPage=_pie_de_pagina, onLaterPages=_pie_de_pagina)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -2852,19 +2330,3 @@ def generar_pdf_desde_historial(
 # FUNCIÓN DE PRUEBA
 # ============================================================
 
-def analizar_mediciones_para_prueba(
-    mediciones_estudio: Sequence[Tuple[Any, Any]],
-    sexo_paciente: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Utilidad para probar el motor SIN generar PDF.
-    """
-    valores = _extraer_mediciones(mediciones_estudio)
-    resultado = construir_informe_automatico(valores, sexo_paciente)
-
-    return {
-        "valores": valores,
-        "hallazgos": [h.texto for h in resultado.hallazgos],
-        "conclusiones": [h.texto for h in resultado.conclusiones],
-        "alertas": resultado.alertas,
-    }

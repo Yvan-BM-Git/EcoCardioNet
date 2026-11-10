@@ -86,6 +86,9 @@ _CSS = """
              transition: background .15s; }
   .ecn-btn:hover { background: #ab2632; }
   .ecn-btn:disabled { background: #d98a91; cursor: wait; }
+  .ecn-legal { text-align: center; font-size: .78rem; margin: 10px 0 0; color: #9aa3b2; }
+  .ecn-legal a { color: #56627a; text-decoration: none; }
+  .ecn-legal a:hover { text-decoration: underline; }
   .ecn-help { text-align: center; font-size: .8rem; color: #7a8598; margin: 18px 0 0; line-height: 1.4; }
 </style>
 """.replace("__PUENTE__", CLAVE_PUENTE)
@@ -217,6 +220,7 @@ def _tarjeta(rut_previo: str, error: str | None) -> str:
       <button type="submit" id="ecn-submit" class="ecn-btn">Ingresar</button>
     </form>
     <p class="ecn-help">¿Olvidaste tu contraseña? Pide al Administrador que la restablezca en Gestión de Usuarios.</p>
+    <p class="ecn-legal"><a href="legal" target="_self">Términos de Servicio</a> · <a href="legal" target="_self">Política de Privacidad</a></p>
   </div>
 </div>
 """

@@ -7,6 +7,8 @@ import streamlit as st
 st.set_page_config(page_title="Nuevo Estudio", page_icon="🩺", layout="wide")
 
 from menu import generar_menu
+from utils import catalogos
+from utils.indicadores import limpiar_cache as limpiar_indicadores
 
 # 1. Dibujar el menú dinámico
 generar_menu()
@@ -16,13 +18,11 @@ if not st.session_state.get("autenticado", False):
     st.warning("🛑 Debes iniciar sesión para ver esta página.")
     # Botón para redirigir al login
     if st.button("🔑 Ir a Iniciar Sesión"):
-        st.session_state["vista_actual"] = "login" # Nos aseguramos de que app.py muestre la pantalla de login (no la de recuperar)
         st.switch_page("app.py")                   # Nombre del script principal
     st.stop()     
 
 import html
 import os
-import tempfile
 import io
 import re
 import unicodedata
@@ -267,50 +267,44 @@ section[data-testid="stMain"] > div:first-child {
 # =====================================================================
 # 1. CARGA GLOBAL DE VARIABLES (Estructura Jerárquica para Subsecciones)
 # =====================================================================
-_session = SessionLocal()
-try:
-    # Orden global de la columna Orden del Excel: así las pestañas y
-    # subsecciones aparecen en el orden clínico definido allí (no alfabético).
-    variables_db = (
-        _session.query(Variable)
-        .order_by(Variable.orden.is_(None), Variable.orden, Variable.categoria)
-        .all()
-    )
-    variables_por_codigo = {v.codigo: v for v in variables_db}
+# Orden global de la columna Orden del Excel: así las pestañas y
+# subsecciones aparecen en el orden clínico definido allí (no alfabético).
+# El catálogo está cacheado (utils/catalogos.py): no se consulta la base
+# en cada interacción.
+variables_db = list(catalogos.variables())
+variables_por_codigo = {v.codigo: v for v in variables_db}
+
+# Estructura: { "Nombre Pestaña": { "Nombre Subsección": [Variables] } }
+tabs_estructura = {}
+
+categorias_ventriculos = [
+    "aorta y auriculas",
+    "aorta y aurículas",
+    "ventrículo derecho",
+    "ventriculo derecho",
+    "ventrículo izquierdo",
+    "ventriculo izquierdo",
+    "pericardio"
+]
+
+for v in variables_db:
+    cat_original = v.categoria if v.categoria else "Sin categoría"
+    cat_lower = cat_original.lower()
     
-    # Estructura: { "Nombre Pestaña": { "Nombre Subsección": [Variables] } }
-    tabs_estructura = {}
-    
-    categorias_ventriculos = [
-        "aorta y auriculas",
-        "aorta y aurículas",
-        "ventrículo derecho",
-        "ventriculo derecho",
-        "ventrículo izquierdo",
-        "ventriculo izquierdo",
-        "pericardio"
-    ]
-    
-    for v in variables_db:
-        cat_original = v.categoria if v.categoria else "Sin categoría"
-        cat_lower = cat_original.lower()
+    if cat_lower.startswith("valvula") or cat_lower.startswith("válvula"):
+        tab_padre = "Válvulas"
+    elif cat_lower in categorias_ventriculos:
+        tab_padre = "Cavidades y aorta"
+    else:
+        tab_padre = cat_original
         
-        if cat_lower.startswith("valvula") or cat_lower.startswith("válvula"):
-            tab_padre = "Válvulas"
-        elif cat_lower in categorias_ventriculos:
-            tab_padre = "Cavidades y aorta"
-        else:
-            tab_padre = cat_original
-            
-        if tab_padre not in tabs_estructura:
-            tabs_estructura[tab_padre] = {}
-            
-        if cat_original not in tabs_estructura[tab_padre]:
-            tabs_estructura[tab_padre][cat_original] = []
-            
-        tabs_estructura[tab_padre][cat_original].append(v)
-finally:
-    _session.close()
+    if tab_padre not in tabs_estructura:
+        tabs_estructura[tab_padre] = {}
+        
+    if cat_original not in tabs_estructura[tab_padre]:
+        tabs_estructura[tab_padre][cat_original] = []
+        
+    tabs_estructura[tab_padre][cat_original].append(v)
 
 
 # ==================================================
@@ -329,10 +323,6 @@ def _to_float(valor):
         return None
 
 
-def _normalizar_texto(valor):
-    if valor is None:
-        return ""
-    return str(valor).strip()
 
 
 # --- Validación de tipos de variables ---------------------------------
@@ -687,39 +677,6 @@ def formatear_busqueda_callback():
             cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
             st.session_state.busqueda_input = f"{cuerpo_formateado}-{dv}"
 
-def formatear_rut_callback():
-    rut_actual = st.session_state.rut_input
-    if not rut_actual: return
-    rut_limpio = "".join(c for c in rut_actual if c.isalnum()).upper()
-    if len(rut_limpio) < 2:
-        st.session_state.rut_input = rut_limpio
-        return
-    cuerpo = rut_limpio[:-1]
-    dv = rut_limpio[-1]
-    if cuerpo.isdigit():
-        st.session_state.rut_input = f"{int(cuerpo):,}".replace(",", ".") + f"-{dv}"
-    else:
-        st.session_state.rut_input = f"{cuerpo}-{dv}"
-
-def formatear_telefono_callback():
-    telf_actual = st.session_state.get("telefono_input", "")
-    
-    if not telf_actual: 
-        return
-        
-    # Mantener solo números
-    numeros = "".join(c for c in str(telf_actual) if c.isdigit())
-    
-    # Restringir estrictamente a un máximo de 9 dígitos
-    numeros = numeros[:9]
-    
-    # Formateo progresivo en bloques de 3
-    if len(numeros) <= 3:
-        st.session_state.telefono_input = numeros
-    elif len(numeros) <= 6:
-        st.session_state.telefono_input = f"{numeros[:3]} {numeros[3:]}"
-    else:
-        st.session_state.telefono_input = f"{numeros[:3]} {numeros[3:6]} {numeros[6:]}"
 
 # ==================================================
 # CÁLCULO AUTOMÁTICO DE ASC E IMC (UNIFICADO)
@@ -918,21 +875,16 @@ def renderizar_variable(variable, col_contenedor):
 # ==================================================
 st.subheader("Selección de Paciente")
 
-_session = SessionLocal()
-try:
-    pacientes_db = _session.query(Paciente).order_by(Paciente.apellido_paterno, Paciente.nombres).all()
-    if pacientes_db:
-        df_pacientes_todos = pd.DataFrame([
-            {
-                "RUT": p.rut,
-                "Nombre completo": f"{p.apellido_paterno} {p.apellido_materno or ''} {p.nombres}".strip(),
-            }
-            for p in pacientes_db
-        ])
-    else:
-        df_pacientes_todos = pd.DataFrame(columns=["RUT", "Nombre completo"])
-finally:
-    _session.close()
+df_pacientes_todos = pd.DataFrame(
+    [
+        {
+            "RUT": p["rut"],
+            "Nombre completo": " ".join(x for x in (p["apellido_paterno"], p["apellido_materno"], p["nombres"]) if x),
+        }
+        for p in catalogos.pacientes()
+    ],
+    columns=["RUT", "Nombre completo"],
+)
 
 col_link, col_search, col_seleccion = st.columns([1, 1, 1.5])
 
@@ -972,7 +924,7 @@ with col_seleccion:
             on_change=lambda: _cambiar_paciente_temporal(st.session_state.get("selectbox_todos_estudios"))
         )
 
-# Selector dinámico de búsqueda (Aparece abajo si se busca algo, igual que en pacientes.py)
+# Selector dinámico de búsqueda (aparece abajo solo si se busca algo)
 if busqueda and not df_pacientes_todos.empty:
     mask = (
         df_pacientes_todos["Nombre completo"].str.contains(busqueda, case=False, na=False) |
@@ -1144,12 +1096,12 @@ if st.session_state.get("mostrar_crear_paciente", False):
     
     c_btn1, c_btn2 = st.columns([1, 4])
     with c_btn1:
-        if st.button("❌ Cancelar", use_container_width=True):
+        if st.button("❌ Cancelar", width="stretch"):
             st.session_state["mostrar_crear_paciente"] = False
             st.rerun()
             
     with c_btn2:
-        if st.button("💾 Guardar y seleccionar paciente", type="primary", use_container_width=True):
+        if st.button("💾 Guardar y seleccionar paciente", type="primary", width="stretch"):
             if not rut_nuevo or not nombres_nuevo or not apellido_paterno_nuevo:
                 st.error("❌ Debe completar al menos: RUT, Nombres y Apellido paterno.")
             else:
@@ -1175,6 +1127,7 @@ if st.session_state.get("mostrar_crear_paciente", False):
                         
                         session.add(nuevo_p)
                         session.commit()
+                        catalogos.limpiar_pacientes()
                         
                         st.session_state["paciente_recien_creado"] = rut_limpio
                         
@@ -1269,6 +1222,7 @@ if rut_seleccionado:
                                 if hasattr(paciente_edit, 'fono_fijo'): paciente_edit.fono_fijo = mod_fono
                                 
                                 session_upd.commit()
+                                catalogos.limpiar_pacientes()
                                 st.success("✅ Datos del paciente actualizados con éxito.")
                                 st.rerun()
                         except Exception as e:
@@ -1497,29 +1451,6 @@ def obtener_valores_reales():
     }
 
 
-def obtener_valor_alias(valores_dict, *codigos):
-    """Devuelve el primer código con contenido. Permite tolerar nombres de
-    variables diferentes entre versiones de la base de datos/Excel."""
-    for codigo in codigos:
-        if codigo in valores_dict and str(valores_dict[codigo]).strip() != "":
-            return valores_dict[codigo]
-    return None
-
-
-def obtener_numero_alias(valores_dict, *codigos):
-    valor = obtener_valor_alias(valores_dict, *codigos)
-    return _to_float(valor)
-
-
-def formato_numero(valor, decimales=1):
-    if valor is None:
-        return None
-    return f"{valor:.{decimales}f}".replace(".", ",")
-
-
-def texto_cualitativo(valores_dict, *codigos):
-    valor = obtener_valor_alias(valores_dict, *codigos)
-    return _normalizar_texto(valor) if valor is not None else None
 
 
 def construir_informe_automatico(valores_dict, sexo_paciente, ritmo=None, fc=None, asc=None, imc=None):
@@ -1537,54 +1468,6 @@ def construir_informe_automatico(valores_dict, sexo_paciente, ritmo=None, fc=Non
     }
     resultado = motor_informe(valores, sexo_paciente, ritmo=ritmo, fc=fc, asc=asc, imc=imc)
     return informe_a_texto_agrupado(resultado)
-
-
-def _grado_integrado_aortico(auto):
-    """Integra Vmax, gradiente, AVA e IVD sin inventar datos faltantes."""
-    grados = [
-        auto.get("GRADO_ESTENOSIS_AO_VPEAK"),
-        auto.get("GRADO_ESTENOSIS_AO_GDTE"),
-        auto.get("GRADO_ESTENOSIS_AO_AVAO"),
-        auto.get("GRADO_ESTENOSIS_AO_IVD"),
-    ]
-    grados = [g for g in grados if g]
-    if not grados:
-        return None
-    # Si existe evidencia severa, se informa severidad; si solo hay datos
-    # intermedios se evita sobreinterpretar.
-    if grados.count("Severa") >= 2:
-        return "Severa"
-    if "Severa" in grados and len(grados) == 1:
-        return "Severa"
-    if "Moderada" in grados:
-        return "Moderada"
-    if "Leve" in grados or "Normal/Leve" in grados:
-        return "Leve"
-    return None
-
-
-def _grado_estenosis_mitral_integrado(auto):
-    grados = [auto.get("GRADO_ESTENOSIS_MITRAL_AREA"), auto.get("GRADO_ESTENOSIS_MITRAL_GDTE")]
-    grados = [g for g in grados if g and g != "Normal"]
-    if not grados:
-        return "Normal" if auto.get("GRADO_ESTENOSIS_MITRAL_AREA") == "Normal" or auto.get("GRADO_ESTENOSIS_MITRAL_GDTE") == "Normal" else None
-    if "Severa" in grados:
-        return "Severa"
-    if "Moderada" in grados:
-        return "Moderada"
-    return "Leve"
-
-
-def _grado_rm_integrado(auto):
-    grados = [auto.get("GRADO_RM_VC"), auto.get("GRADO_RM_EROA"), auto.get("GRADO_RM_VOL")]
-    grados = [g for g in grados if g]
-    if not grados:
-        return None
-    if "Severa" in grados:
-        return "Severa"
-    if "Moderada" in grados:
-        return "Moderada"
-    return "Leve"
 
 
 with tabs[-1]:
@@ -1611,7 +1494,7 @@ with tabs[-1]:
 
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button("↻ Regenerar informe automático", use_container_width=True):
+        if st.button("↻ Regenerar informe automático", width="stretch"):
             st.session_state["hallazgos_editables"] = texto_automatico_findings
             st.session_state["conclusiones_editables"] = texto_automatico_conclusiones
             st.rerun()
@@ -1673,6 +1556,8 @@ class _EstudioSimulado: pass
 est_sim = _EstudioSimulado()
 est_sim.fecha_estudio, est_sim.tipo_estudio, est_sim.medico, est_sim.diagnostico, est_sim.motivo, est_sim.fecha_creacion = fecha_estudio, tipo_estudio, medico, diagnostico, "", None
 est_sim.procedencia = procedencia
+est_sim.peso = peso          # sin estos dos, el PDF mostraba "Talla —  Peso —"
+est_sim.talla = talla        # aunque la SC sí estaba calculada
 est_sim.asc_valor = st.session_state.asc_val
 est_sim.imc = st.session_state.imc_val
 est_sim.ritmo = ritmo
@@ -1700,20 +1585,25 @@ st.divider()
 # PDF: generar una sola vez y conservarlo en memoria
 # para poder guardarlo junto al estudio.
 # ==================================================
-pdf_data = None
 pdf_nombre_archivo = None
 
-if paciente_existente:
-    imagenes_bytes = (
-        [datos for _, datos in imagenes_normalizadas] or None
-    )
-    pdf_data = generar_pdf_desde_historial(
+
+def _generar_pdf_actual():
+    """
+    Arma el PDF con lo que hay en pantalla. NO se ejecuta en cada recarga
+    (antes se rehacía el PDF completo con cada tecla): solo cuando el
+    usuario pulsa Descargar o cuando se guarda el informe.
+    """
+    imagenes_bytes = [datos for _, datos in imagenes_normalizadas] or None
+    return generar_pdf_desde_historial(
         est_sim,
         paciente_existente,
         mediciones_pdf,
         imagenes=imagenes_bytes,
     )
 
+
+if paciente_existente:
     pdf_nombre_archivo = (
         f"Informe_Ecocardiograma_"
         f"{rut.strip().replace('.', '').replace('-', '')}_"
@@ -1722,9 +1612,10 @@ if paciente_existente:
 
     st.download_button(
         label="📥 Generar e Imprimir PDF del Informe",
-        data=pdf_data,
+        data=_generar_pdf_actual,
         file_name=pdf_nombre_archivo,
         mime="application/pdf",
+        on_click="ignore",
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -1800,6 +1691,7 @@ def guardar_informe_definitivo():
             medico=medico,
             diagnostico=diagnostico,
             procedencia=procedencia,
+            destino=destino or None,
             ficha_clinica=ficha_clinica,
             peso=_str_to_float_guardado(peso),
             talla=_str_to_float_guardado(talla),
@@ -1817,9 +1709,8 @@ def guardar_informe_definitivo():
         session.add(estudio)
         session.flush()
 
-        if pdf_data is not None and hasattr(estudio, "pdf_original"):
-            estudio.pdf_original = pdf_data
-        if pdf_nombre_archivo and hasattr(estudio, "pdf_nombre_archivo"):
+        if pdf_nombre_archivo:
+            estudio.pdf_original = _generar_pdf_actual()
             estudio.pdf_nombre_archivo = pdf_nombre_archivo
 
         for cod, var_obj in variables_por_codigo.items():
@@ -1837,6 +1728,7 @@ def guardar_informe_definitivo():
             session.add(med)
 
         session.commit()
+        limpiar_indicadores()
 
         # El informe ya terminó. Se elimina SOLO el borrador de este paciente.
         # Los borradores temporales de otros pacientes siguen disponibles en la sesión.

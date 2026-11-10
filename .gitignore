@@ -33,3 +33,8 @@ dist/
 # Logs
 *.log
 *.pdf
+
+# Pruebas
+.pytest_cache/
+.coverage
+htmlcov/

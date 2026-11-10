@@ -10,6 +10,8 @@ import math
 st.set_page_config(page_title="Historial Clínico", page_icon="📁", layout="wide")
 
 from menu import generar_menu
+from utils import catalogos
+from utils.indicadores import limpiar_cache as limpiar_indicadores
 
 # 1. Dibujar el menú dinámico
 generar_menu()
@@ -18,7 +20,6 @@ generar_menu()
 if not st.session_state.get("autenticado", False):
     st.warning("🛑 Debes iniciar sesión para ver esta página.")
     if st.button("🔑 Ir a Iniciar Sesión"):
-        st.session_state["vista_actual"] = "login"
         st.switch_page("app.py")
     st.stop()
 
@@ -26,7 +27,6 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta, date
 
-import pdfplumber
 
 from database.database import SessionLocal, asegurar_bd
 from database.models import Paciente, Estudio, Medicion, Variable
@@ -34,8 +34,8 @@ from database.models import Paciente, Estudio, Medicion, Variable
 asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 from utils.pacientes_utils import (
     OPTS_PREV, OPTS_SEXO, DIC_PREFIJOS, LISTA_PREFIJOS,
-    formatear_rut_dinamico, formatear_telefono_dinamico,
-    separar_prefijo_numero, formatear_busqueda_rut,
+    formatear_telefono_dinamico,
+    formatear_busqueda_rut,
 )
 from utils.pdf_informe import generar_pdf_desde_historial
 from utils.validacion import (
@@ -53,267 +53,76 @@ st.title("📊 Panel de gestión clínica - Ecocardiografía")
 # ==================================================
 # CALLBACK DE FORMATEO (usa la key propia de esta página)
 # ==================================================
+# ==================================================
+# CONSULTAS CACHEADAS Y DESCARGAS DIFERIDAS
+# ==================================================
+@st.cache_data(ttl=120, show_spinner=False)
+def _filtros_base():
+    """Rango de fechas, tipos y médicos para los filtros (3 consultas, cacheadas)."""
+    s = SessionLocal()
+    try:
+        fmin, fmax = s.query(func.min(Estudio.fecha_estudio), func.max(Estudio.fecha_estudio)).one()
+        tipos = [t for (t,) in s.query(Estudio.tipo_estudio).distinct() if t]
+        medicos = [m for (m,) in s.query(Estudio.medico).distinct() if m]
+    finally:
+        s.close()
+    return {"fecha_min": fmin, "fecha_max": fmax, "tipos": tipos, "medicos": medicos}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _conteos(desde, hasta, tipos, medicos):
+    s = SessionLocal()
+    try:
+        total_pac = s.query(func.count(Paciente.rut)).scalar()
+        total_est = s.query(func.count(Estudio.id)).scalar()
+        q = s.query(func.count(Estudio.id)).filter(Estudio.fecha_estudio >= desde, Estudio.fecha_estudio <= hasta)
+        if tipos:
+            q = q.filter(Estudio.tipo_estudio.in_(tipos))
+        if medicos:
+            q = q.filter(Estudio.medico.in_(medicos))
+        return total_pac, total_est, q.scalar()
+    finally:
+        s.close()
+
+
+def _pdf_regenerado(estudio_id):
+    """Devuelve una función sin argumentos que arma el PDF al momento de descargar."""
+    def generar():
+        s = SessionLocal()
+        try:
+            est = s.get(Estudio, estudio_id)
+            pac = s.get(Paciente, est.paciente_rut)
+            meds = (s.query(Medicion, Variable)
+                    .outerjoin(Variable, Medicion.codigo_variable == Variable.codigo)
+                    .filter(Medicion.estudio_id == estudio_id).all())
+            return generar_pdf_desde_historial(est, pac, meds)
+        finally:
+            s.close()
+    return generar
+
+
+def _pdf_original(estudio_id):
+    def leer():
+        s = SessionLocal()
+        try:
+            return s.query(Estudio.pdf_original).filter(Estudio.id == estudio_id).scalar() or b""
+        finally:
+            s.close()
+    return leer
+
+
 def formatear_busqueda_callback():
     busqueda_actual = st.session_state.get("busqueda_input", "")
     st.session_state.busqueda_input = formatear_busqueda_rut(busqueda_actual)
 
 
-# ==================================================
-# UTILIDADES DE IMPORTACIÓN DE PDF (extracción asistida)
-# ==================================================
-def _normalizar(txt):
-    """Minúsculas, sin tildes, espacios colapsados. Facilita el matching por texto."""
-    if not txt:
-        return ""
-    txt = unicodedata.normalize('NFKD', txt)
-    txt = ''.join(c for c in txt if not unicodedata.combining(c))
-    txt = txt.lower()
-    txt = re.sub(r'\s+', ' ', txt)
-    return txt.strip()
-
-
-def extraer_texto_pdf(archivo_subido):
-    """Extrae el texto plano de un PDF (informe basado en texto, no imagen escaneada)."""
-    texto_total = ""
-    with pdfplumber.open(archivo_subido) as pdf:
-        for pagina in pdf.pages:
-            texto_pagina = pagina.extract_text() or ""
-            texto_total += texto_pagina + "\n"
-    return texto_total
-
-
-_NUM = r'(-?\d+[.,]?\d*)'
-
-# Alias de etiquetas conocidas en informes ya vistos, mapeadas al código de Variable.
-# IMPORTANTE: cada equipo/clínica formatea distinto -> esta lista es de "mejor esfuerzo"
-# y conviene seguir ampliándola a medida que aparezcan nuevos formatos de informe.
-ALIASES_MEDICIONES = {
-    "FEVI": [
-        "fe(teich)", "fe (teich)", "fe teich",
-        "fe estimada por simpson del", "fe estimada por 2d del",
-        "fraccion de eyeccion", "frac. eyeccion", "frac eyeccion",
-    ],
-    "TAPSE": ["tapse"],
-    "ONDA_S": ["tv s'", "onda s'", "s' promedio"],
-    "GPR": ["gpr"],
-    "MASA_VI_INDEXADA": ["masa vi/asc", "masa vi indexada"],
-    "PSAP": ["presion sist. ap", "presion sistolica de arteria pulmonar", "psap"],
-    "VELOCIDAD_PICO_AORTICA": ["vmax va", "v. max ao", "vel. maxima ao"],
-    "GRADIENTE_MEDIO_AORTICO": ["va gpmax", "gradiente medio ao", "gdte medio ao"],
-    "TIEMPO_ACELERACION_PULMONAR": ["tap"],
-    "AREA_MITRAL": ["area valvular mitral"],
-    "VENA_CONTRACTA_MITRAL": ["vena contracta mitral"],
-    "EROA_MITRAL": ["eroa mitral"],
-    "VOLUMEN_REGURGITANTE_MITRAL": ["volumen regurgitante mitral"],
-}
-
-
-def _buscar_valor(texto_normalizado, etiquetas):
-    """Busca la primera etiqueta que matchee y devuelve el número más cercano a la derecha."""
-    for etiqueta in etiquetas:
-        et_norm = _normalizar(etiqueta)
-        patron = re.escape(et_norm) + r'[^0-9\-]{0,15}' + _NUM
-        m = re.search(patron, texto_normalizado)
-        if m:
-            return m.group(1).replace(",", ".")
-    return None
-
-
-def _buscar_valor_categorico(texto_normalizado, etiqueta, opciones):
-    """Busca la etiqueta y verifica si alguna de las opciones conocidas aparece cerca."""
-    et_norm = _normalizar(etiqueta)
-    idx = texto_normalizado.find(et_norm)
-    if idx == -1:
-        return None
-    ventana = texto_normalizado[idx: idx + len(et_norm) + 40]
-    for opcion in opciones:
-        if _normalizar(opcion) in ventana:
-            return opcion
-    return None
-
-
-def extraer_mediciones(texto, variables_por_codigo):
-    """
-    Intenta extraer valores del texto de un informe y mapearlos a los códigos
-    de la tabla Variable, respetando el tipo de cada variable (numero, categoria,
-    texto). Devuelve {codigo: valor_str}.
-    No pretende ser exhaustivo: el usuario revisa/corrige antes de guardar.
-    """
-    texto_norm = _normalizar(texto)
-    resultados = {}
-
-    # 1. Alias conocidos (numéricas, curadas a mano) — más confiables
-    for codigo, etiquetas in ALIASES_MEDICIONES.items():
-        var = variables_por_codigo.get(codigo)
-        if not var or var.tipo != "numero":
-            continue
-        valor = _buscar_valor(texto_norm, etiquetas)
-        if valor:
-            resultados[codigo] = valor
-
-    # 2. Fallback genérico por nombre de Variable, respetando el tipo
-    for codigo, var in variables_por_codigo.items():
-        if codigo in resultados:
-            continue
-        nombre_norm = _normalizar(var.nombre or "")
-        if not nombre_norm or len(nombre_norm) < 3:
-            continue
-
-        if var.tipo == "numero":
-            patron = re.escape(nombre_norm) + r'[^0-9\-]{0,15}' + _NUM
-            m = re.search(patron, texto_norm)
-            if m:
-                resultados[codigo] = m.group(1).replace(",", ".")
-
-        elif var.tipo == "categoria":
-            opciones = [
-                o.strip() for o in (getattr(var, "opciones", "") or "").split(";")
-                if o.strip()
-            ]
-            if opciones:
-                valor = _buscar_valor_categorico(texto_norm, nombre_norm, opciones)
-                if valor:
-                    resultados[codigo] = valor
-
-        # "texto" se deja fuera de la extracción automática: el riesgo de falsos
-        # positivos es alto y no aporta valor real revisarlo/corregirlo a ciegas.
-
-    return resultados
-
-def extraer_nombre_paciente(texto):
-    """
-    Extrae el nombre completo del paciente desde el texto del informe.
-
-    Soporta dos formatos:
-    - "Paciente : NOMBRES APELLIDO_PATERNO APELLIDO_MATERNO" (formato chileno habitual,
-      sin coma).
-    - "Name APELLIDO_PATERNO APELLIDO_MATERNO, NOMBRES" (equipos GE Healthcare / informes
-      en inglés, con coma). En este caso las palabras ANTES de la coma son los apellidos
-      (paterno y materno) y las palabras DESPUÉS de la coma son los nombres. Se descartan
-      palabras de relleno como "Image" que a veces quedan intercaladas por el layout del PDF.
-    """
-    # Normalizar espacios y eliminar caracteres no imprimibles (la coma se conserva:
-    # es parte del rango ASCII imprimible \x20-\x7E)
-    texto = re.sub(r'\s+', ' ', texto)
-    texto = re.sub(r'[^\x20-\x7E\u00C0-\u00FF]', '', texto)
-
-    # --- Caso con coma: "APELLIDOS, NOMBRES" ---
-    patron_coma = r'(?i)(?:paciente|nombre|patient|name)\s*:?\s*([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)\s*,'
-    m_coma = re.search(patron_coma, texto)
-    if m_coma:
-        apellidos = [p for p in re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', m_coma.group(1)) if len(p) >= 2]
-
-        # Texto restante después de la coma, hasta el próximo separador de campo conocido
-        resto = texto[m_coma.end():]
-        m_fin = re.search(r'(?i)(?:r\.?u\.?t|rut|edad|años|patient\s*id)', resto)
-        resto = resto[:m_fin.start()] if m_fin else resto
-
-        # Descartar palabras de relleno tipo "Image 1", "Image 2" (ruido de layout del PDF)
-        resto_limpio = re.sub(r'(?i)\bimage\s*\d*\b', ' ', resto)
-        nombres = [p for p in re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', resto_limpio) if len(p) >= 2]
-
-        if not nombres or not apellidos:
-            return None
-
-        ap_paterno = apellidos[0]
-        ap_materno = apellidos[1] if len(apellidos) >= 2 else ""
-
-        # Se reordena a formato chileno (Nombres Apellido_Paterno Apellido_Materno)
-        # para mantener compatibilidad con dividir_nombre_completo().
-        partes_final = nombres[:2] + [p for p in (ap_paterno, ap_materno) if p]
-        return " ".join(partes_final).title()
-
-    # --- Caso sin coma: heurística chilena habitual (Nombres Apellido_Paterno Apellido_Materno) ---
-    patron = r'(?i)(?:paciente|nombre|patient|name)\s*:?\s*([^:]+?)(?=\s*(?:r\.?u\.?t|rut|edad|años|\d))'
-    m = re.search(patron, texto)
-    if not m:
-        return None
-
-    raw = m.group(1).strip()
-
-    # Extraer todas las palabras alfabéticas (ignora puntos, comas, etc.)
-    palabras = re.findall(r'[A-ZÁÉÍÓÚÑa-záéíóúñ]+', raw)
-
-    # Filtrar palabras de una sola letra (como la 'R' suelta)
-    palabras_limpias = [p for p in palabras if len(p) >= 2]
-
-    if len(palabras_limpias) >= 3:
-        nombre_final = " ".join(palabras_limpias[:3])  # Nombres + dos apellidos
-    elif len(palabras_limpias) == 2:
-        nombre_final = " ".join(palabras_limpias[:2])  # Solo nombres + paterno
-    else:
-        return None
-
-    return nombre_final.title()
-
-def dividir_nombre_completo(nombre_completo):
-    """
-    Separa el nombre completo en:
-    - Nombres
-    - Apellido paterno
-    - Apellido materno
-    Asume el formato chileno: [Nombres] [Apellido Paterno] [Apellido Materno]
-    """
-    if not nombre_completo:
-        return "", "", ""
-    partes = nombre_completo.split()
-    if len(partes) == 1:
-        return partes[0], "", ""
-    elif len(partes) == 2:
-        return partes[0], partes[1], ""
-    else:
-        # El último es materno, el penúltimo paterno, el resto nombres
-        return " ".join(partes[:-2]), partes[-2], partes[-1]
-    
-def extraer_datos_generales(texto):
-    """Intenta detectar RUT, nombre, fecha, peso, talla, FC, ritmo, sexo y médico del informe."""
-    datos = {}
-    texto_norm = _normalizar(texto)
-
-    m_rut = re.search(r'r\.?u\.?t\.?\s*:?\s*(\d{1,2}\.?\d{3}\.?\d{3}-[\dk])', texto_norm)
-    if not m_rut:
-        m_rut = re.search(r'patient id\s*(\d{1,8}-[\dk])', texto_norm)
-    if m_rut:
-        datos["rut"] = m_rut.group(1).upper()
-
-    m_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto)
-    if m_fecha:
-        datos["fecha_texto"] = m_fecha.group(1)
-
-    m_nac = re.search(r'birthdate\s+(\d{1,2}/\d{1,2}/\d{2,4})', texto_norm)
-    if m_nac:
-        datos["fecha_nacimiento_texto"] = m_nac.group(1)
-
-    m_genero = re.search(r'gender\s+(masculino|femenino|male|female)|sexo\s*:?\s*(masculino|femenino)', texto_norm)
-    if m_genero:
-        g = (m_genero.group(1) or m_genero.group(2) or "").strip()
-        if g:
-            datos["sexo"] = "Masculino" if g in ("masculino", "male") else "Femenino"
-
-    m_peso = re.search(r'(?:weight|peso)\s*' + _NUM, texto_norm)
-    if m_peso:
-        datos["peso"] = m_peso.group(1).replace(",", ".")
-
-    m_talla = re.search(r'(?:height|talla)\s*' + _NUM, texto_norm)
-    if m_talla:
-        datos["talla"] = m_talla.group(1).replace(",", ".")
-
-    m_fc = re.search(r'(\d{2,3})\s*lpm', texto_norm)
-    if m_fc:
-        datos["fcia"] = m_fc.group(1)
-
-    if re.search(r'ritmo\s*:?\s*sinusal', texto_norm):
-        datos["ritmo"] = "Sinusal"
-
-    m_medico = re.search(r'dr\.?a?\.?\s+[a-záéíóúñ]+(?:\s+[a-záéíóúñ]+){1,3}', texto_norm)
-    if m_medico:
-        datos["medico_sugerido"] = m_medico.group(0).title()
-
-    nombre_detectado = extraer_nombre_paciente(texto)
-    if nombre_detectado:
-        datos["nombre_completo"] = nombre_detectado
-
-    return datos
+from utils.importar_pdf import (
+    extraer_texto_pdf,
+    extraer_mediciones,
+    extraer_nombre_paciente,
+    dividir_nombre_completo,
+    extraer_datos_generales,
+)
 
 
 # Campos generales del formulario de importación: (nombre, decimales)
@@ -395,20 +204,17 @@ try:
     # ==================================================
     # CARGA GLOBAL DE VARIABLES (para importación de PDF)
     # ==================================================
-    variables_db_completas = session.query(Variable).all()
-    variables_por_codigo_global = {v.codigo: v for v in variables_db_completas}
+    variables_por_codigo_global = catalogos.variables_por_codigo()
 
     # ==================================================
     # 1. SIDEBAR CON FILTROS GLOBALES
     # ==================================================
     st.sidebar.header("🔍 Filtros globales")
 
-    fecha_min = session.query(Estudio.fecha_estudio).order_by(Estudio.fecha_estudio).first()
-    fecha_max = session.query(Estudio.fecha_estudio).order_by(Estudio.fecha_estudio.desc()).first()
-
-    if fecha_min and fecha_max:
-        default_start = fecha_min[0]
-        default_end = fecha_max[0]
+    filtros = _filtros_base()
+    if filtros["fecha_min"] and filtros["fecha_max"]:
+        default_start = filtros["fecha_min"]
+        default_end = filtros["fecha_max"]
     else:
         default_start = datetime.today() - timedelta(days=365)
         default_end = datetime.today()
@@ -421,14 +227,12 @@ try:
     with col2:
         fecha_hasta = st.date_input("Hasta", value=default_end)
 
-    tipos_estudio = session.query(Estudio.tipo_estudio).distinct().all()
-    tipos_estudio = [t[0] for t in tipos_estudio if t[0]]
+    tipos_estudio = filtros["tipos"]
     tipo_seleccionado = st.sidebar.multiselect("Tipo de estudio", tipos_estudio, default=tipos_estudio)
 
     st.sidebar.subheader("👨‍⚕️ Médico responsable")
 
-    medicos_db = session.query(Estudio.medico).distinct().all()
-    medicos_db = [m[0] for m in medicos_db if m[0]]
+    medicos_db = filtros["medicos"]
 
     def normalizar_medico(nombre):
         nombre = nombre.strip()
@@ -505,17 +309,9 @@ try:
     # ==================================================
     # 2. ESTADÍSTICAS GENERALES
     # ==================================================
-    total_pacientes = session.query(Paciente).count()
-    total_estudios = session.query(Estudio).count()
-    estudios_periodo = session.query(Estudio).filter(
-        Estudio.fecha_estudio >= fecha_desde,
-        Estudio.fecha_estudio <= fecha_hasta
+    total_pacientes, total_estudios, estudios_periodo = _conteos(
+        fecha_desde, fecha_hasta, tuple(tipo_seleccionado), tuple(medico_seleccionado)
     )
-    if tipo_seleccionado:
-        estudios_periodo = estudios_periodo.filter(Estudio.tipo_estudio.in_(tipo_seleccionado))
-    if medico_seleccionado:
-        estudios_periodo = estudios_periodo.filter(Estudio.medico.in_(medico_seleccionado))
-    estudios_periodo = estudios_periodo.count()
 
     col1, col2, col3 = st.columns(3)
     col1.metric("🏥 Total pacientes", total_pacientes)
@@ -599,11 +395,11 @@ try:
                     Paciente.rut == rut_normalizado_busqueda
                 ).first()
                 if not paciente_encontrado:
+                    # Mismo RUT escrito con o sin puntos/guion: se compara en SQL
+                    # en vez de traer todos los pacientes.
                     limpio_buscado = re.sub(r'[.\-]', '', rut_normalizado_busqueda)
-                    for c in session.query(Paciente).all():
-                        if re.sub(r'[.\-]', '', c.rut.upper()) == limpio_buscado:
-                            paciente_encontrado = c
-                            break
+                    rut_sql = func.replace(func.replace(func.upper(Paciente.rut), ".", ""), "-", "")
+                    paciente_encontrado = session.query(Paciente).filter(rut_sql == limpio_buscado).first()
 
             usar_paciente_existente = False
             datos_paciente_nuevo = {}
@@ -939,7 +735,7 @@ try:
                                 "Valor detectado": st.column_config.NumberColumn(format="%.4g", step=0.01),
                             },
                             hide_index=True,
-                            use_container_width=True,
+                            width="stretch",
                             key=f"editor_import_global_numericas_{pdf_suffix}",
                         )
                         piezas_df_detectadas.append(df_num_det)
@@ -973,7 +769,7 @@ try:
                                 "Valor detectado": valor_col_config_det,
                             },
                             hide_index=True,
-                            use_container_width=True,
+                            width="stretch",
                             key=f"editor_import_global_categoricas_{pdf_suffix}",
                         )
                         piezas_df_detectadas.append(df_cat_det)
@@ -1002,7 +798,7 @@ try:
                         st.session_state["manual_numericas"],
                         num_rows="dynamic",
                         hide_index=True,
-                        use_container_width=True,
+                        width="stretch",
                         column_config={
                             "Código": st.column_config.SelectboxColumn(
                                 "Código", options=sorted(vars_numericas.keys()), required=True,
@@ -1059,7 +855,7 @@ try:
                         st.session_state["manual_categoricas"],
                         num_rows="dynamic",
                         hide_index=True,
-                        use_container_width=True,
+                        width="stretch",
                         disabled=["Código", "Valor"],
                         key=f"editor_manual_categoricas_{pdf_suffix}",
                     )
@@ -1080,7 +876,7 @@ try:
                         st.session_state["manual_texto"],
                         num_rows="dynamic",
                         hide_index=True,
-                        use_container_width=True,
+                        width="stretch",
                         column_config={
                             "Código": st.column_config.SelectboxColumn(
                                 "Código", options=sorted(vars_texto.keys()), required=True,
@@ -1184,10 +980,8 @@ try:
                             )
                             # Campos opcionales: solo si el modelo Estudio los define.
                             # Evita "invalid keyword argument" si la columna no existe en la BD/modelo.
-                            if hasattr(nuevo_estudio, "procedencia"):
-                                nuevo_estudio.procedencia = procedencia_import_g or None
-                            if hasattr(nuevo_estudio, "destino"):
-                                nuevo_estudio.destino = destino_import_g or None
+                            nuevo_estudio.procedencia = procedencia_import_g or None
+                            nuevo_estudio.destino = destino_import_g or None
 
                             session_import.add(nuevo_estudio)
                             session_import.flush()
@@ -1217,6 +1011,9 @@ try:
                                 contador_guardadas_g += 1
 
                             session_import.commit()
+                            catalogos.limpiar_pacientes()
+                            limpiar_indicadores()
+                            _filtros_base.clear()
                             st.success(f"✅ Informe importado correctamente ({contador_guardadas_g} mediciones guardadas, PDF adjuntado).")
                             del st.session_state[cache_key_g]
                             st.rerun()
@@ -1232,6 +1029,9 @@ try:
     st.subheader("📋 Pacientes registrados")
 
     pacientes = session.query(Paciente).order_by(Paciente.apellido_paterno, Paciente.nombres).all()
+    informes_por_rut = dict(
+        session.query(Estudio.paciente_rut, func.count(Estudio.id)).group_by(Estudio.paciente_rut).all()
+    )
     if pacientes:
         df_pacientes = pd.DataFrame([
             {
@@ -1241,12 +1041,15 @@ try:
                 "Sexo": p.sexo or "",
                 "Teléfono": p.telefono or "",
                 "Email": p.email or "",
-                "Informes asociados": session.query(Estudio).filter(Estudio.paciente_rut == p.rut).count(),
+                "Informes asociados": informes_por_rut.get(p.rut, 0),
             }
             for p in pacientes
         ])
     else:
         df_pacientes = pd.DataFrame(columns=["RUT", "Nombre completo", "Edad", "Sexo", "Teléfono", "Email", "Informes asociados"])
+
+    nombre_por_rut = dict(zip(df_pacientes["RUT"], df_pacientes["Nombre completo"]))
+    pacientes_por_rut = {p.rut: p for p in pacientes}
 
     col_search, col_seleccion = st.columns([1, 1])
 
@@ -1271,11 +1074,11 @@ try:
                 options=opciones_todos,
                 index=None,
                 placeholder="Seleccionar 👇",
-                format_func=lambda r: f"{df_pacientes[df_pacientes['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+                format_func=lambda r: f"{nombre_por_rut.get(r, '')} ({r})",
                 key="selectbox_historial_paciente",
             )
             if paciente_seleccionado_rut:
-                paciente_obj = session.query(Paciente).filter(Paciente.rut == paciente_seleccionado_rut).first()
+                paciente_obj = pacientes_por_rut.get(paciente_seleccionado_rut)
             else:
                 paciente_obj = None
 
@@ -1296,12 +1099,12 @@ try:
                 options=df_filtrado["RUT"].tolist(),
                 index=None,
                 placeholder="Resultados de búsqueda 👇",
-                format_func=lambda r: f"{df_filtrado[df_filtrado['RUT'] == r]['Nombre completo'].iloc[0]} ({r})",
+                format_func=lambda r: f"{nombre_por_rut.get(r, '')} ({r})",
                 key="selectbox_busqueda_historial",
             )
             if rut_filtrado:
                 paciente_seleccionado_rut = rut_filtrado
-                paciente_obj = session.query(Paciente).filter(Paciente.rut == rut_filtrado).first()
+                paciente_obj = pacientes_por_rut.get(rut_filtrado)
         else:
             st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
 
@@ -1354,13 +1157,6 @@ try:
             if estudio_seleccionado_obj:
                 est_objeto = opciones_estudios[estudio_seleccionado_obj]
 
-                mediciones_este_estudio = (
-                    session.query(Medicion, Variable)
-                    .outerjoin(Variable, Medicion.codigo_variable == Variable.codigo)
-                    .filter(Medicion.estudio_id == est_objeto.id)
-                    .all()
-                )
-
                 hora_registro_estudio = (
                     est_objeto.fecha_creacion.strftime('%H:%M:%S')
                     if hasattr(est_objeto, 'fecha_creacion') and est_objeto.fecha_creacion
@@ -1387,54 +1183,55 @@ try:
 
                     col_pdf1, col_pdf2 = st.columns(2)
                     with col_pdf1:
-                        pdf_historial = generar_pdf_desde_historial(
-                            est_objeto, paciente_obj, mediciones_este_estudio
-                        )
                         st.download_button(
                             label="📥 Re-generar y Descargar PDF de este Examen",
-                            data=pdf_historial,
+                            # Se genera solo al pulsar (antes se rehacía en cada recarga).
+                            data=_pdf_regenerado(est_objeto.id),
                             file_name=(
                                 f"Informe_{est_objeto.tipo_estudio.replace(' ', '_')}_"
                                 f"{paciente_obj.rut}_{est_objeto.fecha_estudio.strftime('%Y%m%d')}.pdf"
                             ),
                             mime="application/pdf",
                             key=f"pdf_btn_{est_objeto.id}",
+                            on_click="ignore",
                         )
                     with col_pdf2:
-                        if getattr(est_objeto, 'pdf_original', None):
+                        # pdf_nombre_archivo es liviano; el binario solo se lee al descargar.
+                        if est_objeto.pdf_nombre_archivo:
                             st.download_button(
                                 label="📎 Descargar PDF Original Importado",
-                                data=est_objeto.pdf_original,
-                                file_name=est_objeto.pdf_nombre_archivo or f"informe_original_{est_objeto.id}.pdf",
+                                data=_pdf_original(est_objeto.id),
+                                file_name=est_objeto.pdf_nombre_archivo,
                                 mime="application/pdf",
                                 key=f"pdf_original_btn_{est_objeto.id}",
+                                on_click="ignore",
                             )
 
             st.divider()
 
             mediciones = []
-            for est in estudios_paciente:
-                mediciones_q = session.query(
-                    Medicion.codigo_variable,
-                    # Los enteros se guardan en valor_entero (desde el commit de
-                    # valores tipados); se unifican aquí para gráficos y tablas.
-                    func.coalesce(Medicion.valor_num, Medicion.valor_entero).label("valor_num"),
-                    Medicion.valor_texto,
-                    Estudio.fecha_estudio,
-                    Estudio.medico,
-                    Estudio.tipo_estudio,
-                ).join(Estudio, Medicion.estudio_id == Estudio.id).filter(
-                    Medicion.estudio_id == est.id
-                ).all()
-                for m in mediciones_q:
-                    mediciones.append({
-                        "fecha": m.fecha_estudio,
-                        "variable": m.codigo_variable,
-                        "valor_num": m.valor_num,
-                        "valor_texto": m.valor_texto,
-                        "medico": m.medico,
-                        "tipo_estudio": m.tipo_estudio,
-                    })
+            # Una sola consulta para todos los estudios del paciente.
+            mediciones_q = session.query(
+                Medicion.codigo_variable,
+                # Los enteros se guardan en valor_entero (desde el commit de
+                # valores tipados); se unifican aquí para gráficos y tablas.
+                func.coalesce(Medicion.valor_num, Medicion.valor_entero).label("valor_num"),
+                Medicion.valor_texto,
+                Estudio.fecha_estudio,
+                Estudio.medico,
+                Estudio.tipo_estudio,
+            ).join(Estudio, Medicion.estudio_id == Estudio.id).filter(
+                Medicion.estudio_id.in_([e.id for e in estudios_paciente])
+            ).all()
+            for m in mediciones_q:
+                mediciones.append({
+                    "fecha": m.fecha_estudio,
+                    "variable": m.codigo_variable,
+                    "valor_num": m.valor_num,
+                    "valor_texto": m.valor_texto,
+                    "medico": m.medico,
+                    "tipo_estudio": m.tipo_estudio,
+                })
 
             df_med = pd.DataFrame(mediciones)
             if not df_med.empty:
@@ -1476,7 +1273,7 @@ try:
                             },
                         )
                         fig.update_xaxes(tickformat="%d/%m/%Y")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                 with st.expander("👁️ Ver matriz completa de datos crudos"):
                     df_all = df_med.copy()
@@ -1486,7 +1283,7 @@ try:
                     )
                     df_show = df_all[["fecha_str", "medico", "tipo_estudio", "variable", "Valor"]].copy()
                     df_show = df_show.sort_values(["fecha_str", "variable"])
-                    st.dataframe(df_show, use_container_width=True)
+                    st.dataframe(df_show, width="stretch")
 
     # ==================================================
     # 5. TENDENCIA GLOBAL (SOLO SI HAY VARIABLES CON DATOS)
@@ -1533,13 +1330,15 @@ try:
                     hover_data=["paciente", "rut"],
                     title=f"Evolución de {var_seleccionada} en toda la cohorte",
                     labels={"fecha_dt": "Fecha", "valor": f"{var_seleccionada}"},
-                    trendline="lowess",
+                    # LOWESS necesita al menos 3 puntos en 2 fechas distintas; con menos
+                    # divide por cero (RuntimeWarning) y la curva no significa nada.
+                    trendline="lowess" if len(df_global) >= 3 and df_global["fecha_dt"].nunique() >= 2 else None,
                 )
                 fig_global.update_xaxes(tickformat="%d/%m/%Y", title_text="Fecha")
-                st.plotly_chart(fig_global, use_container_width=True)
+                st.plotly_chart(fig_global, width="stretch")
             with col_tabla:
                 st.write(f"**Estadísticas descriptivas ({var_seleccionada})**")
-                st.dataframe(df_global["valor"].describe(), use_container_width=True)
+                st.dataframe(df_global["valor"].describe(), width="stretch")
         else:
             st.info(f"No hay mediciones numéricas para '{var_seleccionada}' en el período seleccionado.")
     else:

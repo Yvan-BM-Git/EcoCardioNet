@@ -1,0 +1,5 @@
+# Solo para desarrollo y pruebas (no se necesitan para usar la app).
+-r requirements.txt
+pytest==9.1.1
+pytest-cov
+# Opcional, para tests/test_navegador.py:  pip install playwright && python -m playwright install chromium

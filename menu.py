@@ -18,10 +18,9 @@ def generar_menu():
         st.markdown(f"🏷️ *{rol}*")
 
         # Cerrar sesión
-        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        if st.button("🚪 Cerrar Sesión", width="stretch"):
             st.session_state["autenticado"] = False
             st.session_state["usuario_actual"] = None
-            st.session_state["vista_actual"] = "login"
 
             # Regresar al login
             st.switch_page("app.py")
@@ -35,7 +34,6 @@ def generar_menu():
 
         # Visible para todos los usuarios autenticados
         st.page_link("app.py", label="Inicio", icon="🏠")
-        # st.page_link("pages/pacientes.py", label="Pacientes", icon="🧑‍⚕️")
         st.page_link("pages/estudios.py", label="Estudios", icon="🩺")
         st.page_link("pages/historial.py", label="Historial", icon="📁")
 
@@ -51,3 +49,4 @@ def generar_menu():
             st.page_link("pages/usuarios.py", label="Gestión de Usuarios", icon="👥")
 
         st.divider()
+        st.page_link("pages/legal.py", label="Términos y Privacidad", icon="📄")

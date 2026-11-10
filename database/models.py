@@ -72,6 +72,7 @@ class Estudio(Base):
 # --- NUEVOS CAMPOS GENERALES DEL ECOCARDIOGRAMA ---
     diagnostico = Column(String, nullable=True)
     procedencia = Column(String, nullable=True)
+    destino = Column(String, nullable=True)
     ficha_clinica = Column(String, nullable=True)
     peso = Column(Float, nullable=True)
     talla = Column(Float, nullable=True)
@@ -139,3 +140,13 @@ class Medicion(Base):
         if self.valor_texto is not None:
             return str(self.valor_texto)
         return None
+
+class AceptacionLegal(Base):
+    """Registro de que un usuario aceptó una versión de los Términos o de la Política (Ley 21.719)."""
+    __tablename__ = "aceptaciones_legales"
+
+    id = Column(Integer, primary_key=True)
+    usuario_rut = Column(String, nullable=False, index=True)
+    documento = Column(String, nullable=False)   # "terminos" | "privacidad"
+    version = Column(String, nullable=False)
+    fecha = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -1,7 +1,6 @@
 # Archivo: pages/usuarios.py
 import streamlit as st
 import pandas as pd
-import time
 
 # ==================================================
 # CONFIGURACIÓN DE PÁGINA (Debe ser la primera instrucción)
@@ -9,9 +8,12 @@ import time
 st.set_page_config(page_title="Gestión de Usuarios", page_icon="👥", layout="wide")
 
 from menu import generar_menu
+from utils.login_ui import formatear_rut
 from werkzeug.security import generate_password_hash
 from database.database import SessionLocal, asegurar_bd
 from database.models import Usuario, Rol
+
+LARGO_MINIMO_CLAVE = 8  # igual que create_db.py
 
 asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 
@@ -23,7 +25,6 @@ if not st.session_state.get("autenticado", False):
     st.warning("🛑 Debes iniciar sesión para ver esta página.")
     # Botón para redirigir al login
     if st.button("🔑 Ir a Iniciar Sesión"):
-        st.session_state["vista_actual"] = "login" # Nos aseguramos de que app.py muestre la pantalla de login (no la de recuperar)
         st.switch_page("app.py")                   # Nombre del script principal
     st.stop()
 
@@ -37,24 +38,8 @@ if st.session_state.get("usuario_actual", {}).get("rol") != "Administrador":
 # CALLBACK DINÁMICO PARA AUTOCOMPLETAR RUT EN VIVO
 # ==================================================
 def formatear_rut_usuario_callback(key_destino):
-    rut_actual = st.session_state.get(key_destino, "")
-    if not rut_actual:
-        return
-
-    # Limpiar: dejar solo números y la letra K
-    limpio = "".join(c for c in rut_actual.upper() if c.isdigit() or c == "K")
-    limpio = limpio[:9]
-
-    if len(limpio) < 2:
-        st.session_state[key_destino] = limpio
-        return
-
-    cuerpo = limpio[:-1]
-    dv = limpio[-1]
-
-    if cuerpo.isdigit():
-        cuerpo_formateado = f"{int(cuerpo):,}".replace(",", ".")
-        st.session_state[key_destino] = f"{cuerpo_formateado}-{dv}"
+    """Deja el RUT con puntos y guion (misma regla que el login)."""
+    st.session_state[key_destino] = formatear_rut(st.session_state.get(key_destino, ""))
 
 
 # ==========================================
@@ -96,16 +81,19 @@ with tab1:
 
     nombre = st.text_input("Nombre", key="nombre_nuevo")
     email = st.text_input("Email", key="email_nuevo")
-    password = st.text_input("Contraseña", type="password", key="password_nuevo")
-    rol_seleccionado = st.selectbox("Rol", ROLES_SISTEMA)
+    password = st.text_input("Contraseña", type="password", key="password_nuevo",
+                             placeholder=f"Mínimo {LARGO_MINIMO_CLAVE} caracteres")
+    rol_seleccionado = st.selectbox("Rol", ROLES_SISTEMA, key="rol_nuevo")
 
-    guardar = st.button("Guardar Usuario", type="primary")
+    guardar = st.button("Guardar Usuario", type="primary", key="btn_guardar_usuario")
 
     if guardar:
         rut_limpio_db = rut_visible.strip()
         
         if not rut_limpio_db or not nombre or not password:
             st.error("❌ RUT, Nombre y Contraseña son obligatorios.")
+        elif len(password) < LARGO_MINIMO_CLAVE:
+            st.error(f"❌ La contraseña debe tener al menos {LARGO_MINIMO_CLAVE} caracteres.")
         else:
             session = SessionLocal()
             try:
@@ -130,10 +118,7 @@ with tab1:
                     )
                     session.add(nuevo_user)
                     session.commit()
-                    st.success(f"✅ Usuario {nombre} ({rol_seleccionado}) creado correctamente.")
-                    st.balloons()
-                    
-                    time.sleep(1)
+                    st.toast(f"Usuario {nombre} ({rol_seleccionado}) creado correctamente.", icon="✅")
                     # 🚩 Levantamos la bandera de limpieza y reiniciamos
                     st.session_state["limpiar_form_usuarios"] = True
                     st.rerun()
@@ -186,7 +171,7 @@ with tab2:
                     df_usuarios["RUT"].str.contains(busqueda, case=False, na=False)
                 ]
             
-            st.dataframe(df_usuarios, use_container_width=True, hide_index=True)
+            st.dataframe(df_usuarios, width="stretch", hide_index=True)
             st.caption(f"Total de cuentas en el sistema: {len(lista_usuarios)} usuarios.")
             
             st.divider()
@@ -206,7 +191,7 @@ with tab2:
                 
             with col_btn:
                 st.markdown("<div style='padding-top: 24px;'></div>", unsafe_allow_html=True)
-                btn_eliminar = st.button("❌ Eliminar Usuario", type="primary", use_container_width=True)
+                btn_eliminar = st.button("❌ Eliminar Usuario", type="primary", width="stretch")
                 
             if btn_eliminar:
                 if not rut_a_eliminar:
@@ -219,8 +204,7 @@ with tab2:
                         nombre_eliminado = usuario_a_borrar.nombre
                         session.delete(usuario_a_borrar)
                         session.commit()
-                        st.success(f"✅ El usuario **{nombre_eliminado}** (RUT: {rut_a_eliminar}) fue removido con éxito del sistema.")
-                        time.sleep(1)
+                        st.toast(f"Usuario {nombre_eliminado} ({rut_a_eliminar}) eliminado.", icon="✅")
                         st.rerun()
                     else:
                         st.error("❌ El usuario no pudo ser encontrado en la base de datos.")
@@ -243,13 +227,17 @@ with tab3:
         st.info("No hay usuarios disponibles para modificar.")
     else:
         with st.form("cambiar_password_form"):
-            rut_a_cambiar = st.selectbox("Selecciona el RUT del usuario", options=todos_los_ruts)
-            nueva_password = st.text_input("Escribe la NUEVA Contraseña", type="password", placeholder="Mínimo 6 caracteres")
+            rut_a_cambiar = st.selectbox("Selecciona el RUT del usuario", options=todos_los_ruts,
+                                         key="rut_cambiar_clave")
+            nueva_password = st.text_input("Escribe la NUEVA Contraseña", type="password",
+                                           placeholder=f"Mínimo {LARGO_MINIMO_CLAVE} caracteres", key="nueva_clave")
             confirmar_btn = st.form_submit_button("Actualizar Contraseña", type="primary")
             
         if confirmar_btn:
             if not nueva_password:
                 st.error("❌ Debes ingresar una nueva contraseña.")
+            elif len(nueva_password) < LARGO_MINIMO_CLAVE:
+                st.error(f"❌ La contraseña debe tener al menos {LARGO_MINIMO_CLAVE} caracteres.")
             else:
                 session = SessionLocal()
                 try:
@@ -357,8 +345,7 @@ with tab4:
 
                 session.commit()
 
-                st.success("✅ Usuario actualizado correctamente.")
-                time.sleep(1)
+                st.toast("Usuario actualizado correctamente.", icon="✅")
                 st.rerun()
 
         except Exception as e:
