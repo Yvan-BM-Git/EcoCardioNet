@@ -28,14 +28,25 @@ from datetime import datetime, timedelta, date
 
 import pdfplumber
 
-from database.database import SessionLocal
+from database.database import SessionLocal, asegurar_bd
 from database.models import Paciente, Estudio, Medicion, Variable
+
+asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 from utils.pacientes_utils import (
     OPTS_PREV, OPTS_SEXO, DIC_PREFIJOS, LISTA_PREFIJOS,
     formatear_rut_dinamico, formatear_telefono_dinamico,
     separar_prefijo_numero, formatear_busqueda_rut,
 )
 from utils.pdf_informe import generar_pdf_desde_historial
+from utils.validacion import (
+    DECIMALES_MAX,
+    advertencia_rango,
+    inyectar_bloqueo_numerico,
+    on_change_numerico,
+    permite_negativo,
+    validar_numero,
+)
+from sqlalchemy import func
 
 st.title("📊 Panel de gestión clínica - Ecocardiografía")
 
@@ -303,6 +314,58 @@ def extraer_datos_generales(texto):
         datos["nombre_completo"] = nombre_detectado
 
     return datos
+
+
+# Campos generales del formulario de importación: (nombre, decimales)
+CAMPOS_IMPORT = {
+    "peso_import_input_g":  ("Peso (kg)",  DECIMALES_MAX),
+    "talla_import_input_g": ("Talla (cm)", DECIMALES_MAX),
+    "pas_import_global":    ("PAS (mmHg)", 0),
+    "pad_import_global":    ("PAD (mmHg)", 0),
+    "fcia_import_global":   ("FC (lpm)",   0),
+}
+
+
+def on_change_import(key):
+    """Valida un campo general de la importación; peso/talla recalculan ASC e IMC."""
+    nombre, dec = CAMPOS_IMPORT[key]
+    on_change_numerico(key, permitir_negativo=False, decimales=dec, nombre=nombre)
+    if key in ("peso_import_input_g", "talla_import_input_g"):
+        calcular_asc_imc_import()
+
+
+def validar_campos_import():
+    """Devuelve ({key: numero}, [errores]) de los campos generales de la importación."""
+    valores, errores = {}, []
+    for key, (nombre, dec) in CAMPOS_IMPORT.items():
+        numero, error = validar_numero(
+            st.session_state.get(key, ""), permitir_negativo=False, decimales=dec, nombre=nombre
+        )
+        if error:
+            errores.append(error)
+        valores[key] = (int(numero) if dec == 0 else float(numero)) if numero is not None else None
+    return valores, errores
+
+
+def validar_medicion_import(var, valor):
+    """
+    Valida un valor numérico de la tabla de mediciones importadas.
+    Devuelve (numero, error). Los valores leídos del PDF pueden traer más
+    decimales: se redondean a DECIMALES_MAX en vez de rechazarlos.
+    """
+    if isinstance(valor, float) and not valor.is_integer():
+        valor = round(valor, DECIMALES_MAX)
+    numero, error = validar_numero(
+        valor,
+        permitir_negativo=permite_negativo(var.codigo),
+        decimales=DECIMALES_MAX,
+        nombre=var.nombre or var.codigo,
+    )
+    if numero is None and error is None:
+        return None, None
+    if isinstance(numero, float) and numero.is_integer():
+        numero = int(numero)
+    return numero, error
 
 
 def calcular_asc_imc_import():
@@ -782,23 +845,35 @@ try:
 
                 cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8 = st.columns([1, 1, 1, 1, 1, 1, 2, 1])
                 with cv1:
+                    st.session_state.setdefault(
+                        "peso_import_input_g", str(generales_g.get("peso", "") or "").replace(",", ".")
+                    )
                     peso_import_g = st.text_input(
-                        "PESO (kg)", value=generales_g.get("peso", ""),
-                        key="peso_import_input_g", on_change=calcular_asc_imc_import,
+                        "PESO (kg)", key="peso_import_input_g",
+                        on_change=on_change_import, args=("peso_import_input_g",),
                     )
                 with cv2:
+                    st.session_state.setdefault(
+                        "talla_import_input_g", str(generales_g.get("talla", "") or "").replace(",", ".")
+                    )
                     talla_import_g = st.text_input(
-                        "TALLA (cm)", value=generales_g.get("talla", ""),
-                        key="talla_import_input_g", on_change=calcular_asc_imc_import,
+                        "TALLA (cm)", key="talla_import_input_g",
+                        on_change=on_change_import, args=("talla_import_input_g",),
                     )
                 with cv3:
                     asc_import_g = st.text_input("ASC", value=st.session_state.asc_import_val_g, disabled=True)
                 with cv4:
                     imc_import_g = st.text_input("IMC", value=st.session_state.imc_import_val_g, disabled=True)
                 with cv5:
-                    pas_import_g = st.text_input("PAS", key="pas_import_global")
+                    pas_import_g = st.text_input(
+                        "PAS", key="pas_import_global",
+                        on_change=on_change_import, args=("pas_import_global",),
+                    )
                 with cv6:
-                    pad_import_g = st.text_input("PAD", key="pad_import_global")
+                    pad_import_g = st.text_input(
+                        "PAD", key="pad_import_global",
+                        on_change=on_change_import, args=("pad_import_global",),
+                    )
                 with cv7:
                     opciones_ritmo_g = ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal",
                                         "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular",
@@ -807,9 +882,16 @@ try:
                     idx_ritmo_g = opciones_ritmo_g.index(ritmo_detectado_g) if ritmo_detectado_g in opciones_ritmo_g else 0
                     ritmo_import_g = st.selectbox("Ritmo", opciones_ritmo_g, index=idx_ritmo_g, key="ritmo_import_global")
                 with cv8:
-                    fcia_import_g = st.text_input(
-                        "FCia", value=generales_g.get("fcia", ""), key="fcia_import_global",
+                    st.session_state.setdefault(
+                        "fcia_import_global", str(generales_g.get("fcia", "") or "")
                     )
+                    fcia_import_g = st.text_input(
+                        "FCia", key="fcia_import_global",
+                        on_change=on_change_import, args=("fcia_import_global",),
+                    )
+                inyectar_bloqueo_numerico(
+                    {k: {"neg": False, "dec": dec} for k, (_, dec) in CAMPOS_IMPORT.items()}
+                )
 
                 st.markdown("##### 3️⃣ Mediciones detectadas (editable)")
 
@@ -854,7 +936,7 @@ try:
                                 "Código": st.column_config.TextColumn(disabled=True),
                                 "Nombre": st.column_config.TextColumn(disabled=True),
                                 "Unidad": st.column_config.TextColumn(disabled=True),
-                                "Valor detectado": st.column_config.NumberColumn(format="%.4g"),
+                                "Valor detectado": st.column_config.NumberColumn(format="%.4g", step=0.01),
                             },
                             hide_index=True,
                             use_container_width=True,
@@ -926,7 +1008,7 @@ try:
                                 "Código", options=sorted(vars_numericas.keys()), required=True,
                             ),
                             "Valor": st.column_config.NumberColumn(
-                                "Valor", required=True, format="%.4g",
+                                "Valor", required=True, format="%.4g", step=0.01,
                             ),
                         },
                         key=f"editor_manual_numericas_{pdf_suffix}",
@@ -1023,7 +1105,32 @@ try:
                         ignore_index=True
                     )
 
-                if st.button("✅ Confirmar e Importar al Historial", type="primary", key="btn_confirmar_import_global"):
+                # Validación previa: ningún dato con formato incorrecto llega a la BD.
+                generales_validos_g, errores_import_g = validar_campos_import()
+                avisos_rango_g = []
+                for _, fila_v in df_editado_import_g.iterrows():
+                    var_v = variables_por_codigo_global.get(fila_v["Código"])
+                    if var_v is None or var_v.tipo != "numero":
+                        continue
+                    num_v, err_v = validar_medicion_import(var_v, fila_v["Valor detectado"])
+                    if err_v:
+                        errores_import_g.append(err_v)
+                    else:
+                        aviso_v = advertencia_rango(
+                            num_v, getattr(var_v, "valor_minimo", None),
+                            getattr(var_v, "valor_maximo", None), var_v.unidad or "",
+                        )
+                        if aviso_v:
+                            avisos_rango_g.append(f"{var_v.nombre}: {aviso_v}")
+                if avisos_rango_g:
+                    st.warning("⚠️ Revise estos valores (no impiden importar):\n\n- " + "\n- ".join(avisos_rango_g))
+
+                confirmar_import_g = st.button(
+                    "✅ Confirmar e Importar al Historial", type="primary", key="btn_confirmar_import_global"
+                )
+                if confirmar_import_g and errores_import_g:
+                    st.error("❌ Corrija estos datos antes de importar:\n\n- " + "\n- ".join(errores_import_g))
+                elif confirmar_import_g:
                     session_import = SessionLocal()
                     try:
                         crear_paciente_nuevo = not (paciente_encontrado and usar_paciente_existente)
@@ -1063,14 +1170,14 @@ try:
                                 medico=medico_import_g or None,
                                 ficha_clinica=ficha_clinica_import_g or None,
                                 diagnostico=diagnostico_import_g or None,
-                                peso=float(peso_import_g.replace(",", ".")) if peso_import_g else None,
-                                talla=float(talla_import_g.replace(",", ".")) if talla_import_g else None,
+                                peso=generales_validos_g["peso_import_input_g"],
+                                talla=generales_validos_g["talla_import_input_g"],
                                 asc_valor=float(asc_import_g) if asc_import_g else None,
                                 imc=float(imc_import_g) if imc_import_g else None,
-                                pas=pas_import_g or None,
-                                pad=pad_import_g or None,
+                                pas=generales_validos_g["pas_import_global"],
+                                pad=generales_validos_g["pad_import_global"],
                                 ritmo=ritmo_import_g or None,
-                                fcia=fcia_import_g or None,
+                                fcia=generales_validos_g["fcia_import_global"],
                                 observaciones="[IMPORTADO DESDE PDF]",
                                 pdf_original=datos_cache_g["pdf_bytes"],
                                 pdf_nombre_archivo=datos_cache_g["pdf_nombre"],
@@ -1090,10 +1197,21 @@ try:
                                 val = str(fila["Valor detectado"]).strip()
                                 if not val or val.lower() == "nan":
                                     continue
-                                med = Medicion(estudio_id=nuevo_estudio.id, codigo_variable=fila["Código"])
-                                try:
-                                    med.valor_num = float(val.replace(",", "."))
-                                except ValueError:
+                                var_m = variables_por_codigo_global.get(fila["Código"])
+                                med = Medicion(
+                                    estudio_id=nuevo_estudio.id,
+                                    codigo_variable=fila["Código"],
+                                    variable_id=var_m.id if var_m is not None else None,
+                                )
+                                if var_m is not None and var_m.tipo == "numero":
+                                    num_m, _ = validar_medicion_import(var_m, fila["Valor detectado"])
+                                    if num_m is None:
+                                        continue
+                                    if isinstance(num_m, int):
+                                        med.valor_entero = num_m
+                                    else:
+                                        med.valor_num = float(num_m)
+                                else:
                                     med.valor_texto = val
                                 session_import.add(med)
                                 contador_guardadas_g += 1
@@ -1221,8 +1339,10 @@ try:
 
             opciones_estudios = {
                 f"📅 {est.fecha_estudio.strftime('%d/%m/%Y')} — {est.tipo_estudio} "
-                f"(Dr/a. {est.medico or 'No registrado'})"
-                + (" 📎" if getattr(est, 'pdf_original', None) else ""): est
+                f"(Dr/a. {est.medico or 'No registrado'}) · N° {est.id}"
+                # N° de estudio: sin él, dos estudios del mismo día, tipo y médico
+                # tenían la misma etiqueta y uno desaparecía de la lista.
+                + (" 📎" if getattr(est, 'pdf_nombre_archivo', None) else ""): est
                 for est in estudios_paciente
             }
 
@@ -1296,7 +1416,9 @@ try:
             for est in estudios_paciente:
                 mediciones_q = session.query(
                     Medicion.codigo_variable,
-                    Medicion.valor_num,
+                    # Los enteros se guardan en valor_entero (desde el commit de
+                    # valores tipados); se unifican aquí para gráficos y tablas.
+                    func.coalesce(Medicion.valor_num, Medicion.valor_entero).label("valor_num"),
                     Medicion.valor_texto,
                     Estudio.fecha_estudio,
                     Estudio.medico,
@@ -1375,7 +1497,7 @@ try:
 
         mediciones_globales = (
             session.query(
-                Medicion.valor_num,
+                func.coalesce(Medicion.valor_num, Medicion.valor_entero),
                 Estudio.fecha_estudio,
                 Paciente.nombres,
                 Paciente.apellido_paterno,
@@ -1386,7 +1508,7 @@ try:
             .join(Paciente, Estudio.paciente_rut == Paciente.rut)
             .filter(
                 Medicion.codigo_variable == codigo_var,
-                Medicion.valor_num.isnot(None),
+                func.coalesce(Medicion.valor_num, Medicion.valor_entero).isnot(None),
                 Estudio.fecha_estudio >= fecha_desde,
                 Estudio.fecha_estudio <= fecha_hasta,
             )

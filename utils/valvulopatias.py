@@ -240,11 +240,14 @@ def _integrar(
         else:
             nivel = _redondear_medio(sum(niveles) / len(niveles))
             nivel = min(max(nivel, 1.5 if mx >= 2 else 1), 2.5 if mn <= 2 else 3)
-        if (cualitativo is not None and abs(cualitativo - nivel) >= 1.5
+        # Diferencia de un grado o más: se informa (antes solo desde 1,5 grados,
+        # y el grado del operador se descartaba sin aviso).
+        if (cualitativo is not None and abs(cualitativo - nivel) >= 1.0
                 and not (cualitativo >= 3 and nivel >= 3)):
             nota = (
-                f"La graduación cualitativa ({_etiqueta(cualitativo)}) no concuerda "
-                f"con la cuantificación; prevalece la cuantificación."
+                f"La graduación cualitativa informada ({_etiqueta(cualitativo)}) no concuerda "
+                f"con la cuantificación ({_etiqueta(nivel)}); prevalece la cuantificación. "
+                "Revisar mecanismo (primaria o secundaria) y la medición."
             )
         return {"estado": "definitivo", "nivel": nivel, "etiqueta": _etiqueta(nivel), "nota": nota}
 
@@ -383,6 +386,54 @@ def _armar_regurgitacion(
 # Índice adimensional (DVI): >0,50 | 0,25–0,50 | <0,25
 # Bajo flujo: VS indexado ≤35 mL/m²
 
+
+# ============================================================
+# PRÓTESIS VALVULARES (ASE 2009, Zoghbi et al.; actualización ASE 2024)
+# Cada parámetro: 0 = normal | 1 = posible estenosis | 2 = sugiere obstrucción significativa
+#   Aórtica: Vmax <3 | 3–4 | >4 m/s ; GM <20 | 20–35 | >35 mmHg ; DVI ≥0,30 | 0,25–0,29 | <0,25
+#   Mitral : GM ≤5 | 6–10 | >10 mmHg ; PHT <130 | 130–200 | >200 ms
+# ============================================================
+
+def _evaluar_protesis(posicion: str, protesis: str, criterios, params: str, clave: str, cat: str, nombre: str):
+    """criterios = [(etiqueta, nivel 0/1/2), ...] solo de los parámetros ingresados."""
+    nombre_pos = f"Prótesis {posicion} ({protesis})"
+    if not criterios:
+        return _resultado(clave, cat, nombre, "protesis",
+                          f"{nombre_pos}{params}. Sin parámetros Doppler suficientes para evaluar su función.",
+                          f"{nombre_pos}: evaluar función con criterios protésicos.")
+    peor = max(n for _, n in criterios)
+    sig = [e for e, n in criterios if n == 2]
+    normales = [e for e, n in criterios if n == 0]
+    dvi_normal = any(e.startswith("DVI") and n == 0 for e, n in criterios)
+    if peor == 2 and dvi_normal:
+        # Algoritmo ASE: gradiente alto con DVI ≥0,30 apunta a alto flujo o
+        # desproporción prótesis-paciente, no a obstrucción de la prótesis.
+        texto = (f"{nombre_pos} con gradientes elevados [{', '.join(sig)}] y DVI normal{params}: "
+                 "patrón sugerente de estado de alto flujo o desproporción prótesis-paciente más que de "
+                 "obstrucción. Evaluar tiempo de aceleración, área efectiva indexada y comparar con el estudio basal.")
+        return _resultado(clave, cat, nombre, "protesis_alto_gradiente", texto,
+                          f"{nombre_pos} con gradientes elevados y DVI normal: sugiere alto flujo o desproporción "
+                          "prótesis-paciente; comparar con estudio basal.", 2)
+    if peor == 2:
+        texto = (f"{nombre_pos} con parámetros sugerentes de obstrucción significativa{params} "
+                 f"[{', '.join(sig)}]. Comparar con el gradiente basal posimplante y descartar "
+                 "trombosis o pannus (fluoroscopía/ETE).")
+        if normales:
+            texto += (f" Discordancia con {', '.join(normales)} en rango normal: considerar estado "
+                      "de alto flujo o desproporción prótesis-paciente.")
+        return _resultado(clave, cat, nombre, "protesis_obstruccion", texto,
+                          f"{nombre_pos} con gradientes elevados sugerentes de obstrucción protésica significativa; "
+                          "descartar trombosis o pannus.", 3)
+    if peor == 1:
+        return _resultado(clave, cat, nombre, "protesis_posible", 
+                          f"{nombre_pos} con gradientes en rango intermedio{params}: posible estenosis protésica; "
+                          "comparar con el estudio basal posimplante.",
+                          f"{nombre_pos}: posible estenosis protésica (gradientes intermedios); comparar con estudio basal.", 2)
+    return _resultado(clave, cat, nombre, "protesis_normal",
+                      f"{nombre_pos} con parámetros Doppler en rango normal{params}.",
+                      f"{nombre_pos} normofuncionante según parámetros Doppler.", 0)
+
+
 def evaluar_estenosis_aortica(L: _Lector, fevi: Optional[float]) -> Optional[Dict[str, Any]]:
     vmax = L.num("VELOCIDAD_PICO_AORTICA", "V_PEAK_AO", "V_MAX_AO")
     gm = L.num("GRADIENTE_MEDIO_AORTICO", "GRADIENTE_AORTICO")
@@ -411,10 +462,11 @@ def evaluar_estenosis_aortica(L: _Lector, fevi: Optional[float]) -> Optional[Dic
     cat = "valvula_aortica"
 
     if protesis and protesis != "plastia":
-        texto = (f"Prótesis aórtica ({protesis}){params}. Los umbrales de estenosis de válvula "
-                 "nativa no son aplicables; evaluar con área efectiva, DVI y tiempo de aceleración protésicos.")
-        return _resultado("estenosis_ao", cat, N, "protesis", texto,
-                          f"Prótesis aórtica ({protesis}): evaluar función con criterios protésicos.")
+        crit = []
+        if vmax is not None: crit.append((f"Vmax {_fmt(vmax, 1)} m/s", 2 if vmax > 4 else 1 if vmax >= 3 else 0))
+        if gm is not None: crit.append((f"GM {_fmt(gm, 0)} mmHg", 2 if gm > 35 else 1 if gm >= 20 else 0))
+        if dvi is not None: crit.append((f"DVI {_fmt(dvi, 2)}", 2 if dvi < 0.25 else 1 if dvi < 0.30 else 0))
+        return _evaluar_protesis("aórtica", protesis, crit, params, "estenosis_ao", cat, N)
 
     # Niveles por parámetro (0 = sin estenosis)
     niv = []
@@ -568,10 +620,10 @@ def evaluar_estenosis_mitral(L: _Lector) -> Optional[Dict[str, Any]]:
     params = " (" + "; ".join(det) + ")"
 
     if protesis and protesis != "plastia":
-        return _resultado("estenosis_mitral", cat, N, "protesis",
-                          f"Prótesis mitral ({protesis}){params}. Evaluar con criterios protésicos "
-                          "(gradiente medio, VTI prótesis/TSVI, área efectiva).",
-                          f"Prótesis mitral ({protesis}): evaluar función con criterios protésicos.")
+        crit = []
+        if gm is not None: crit.append((f"GM {_fmt(gm, 0)} mmHg", 2 if gm > 10 else 1 if gm > 5 else 0))
+        if pht is not None: crit.append((f"PHT {_fmt(pht, 0)} ms", 2 if pht > 200 else 1 if pht >= 130 else 0))
+        return _evaluar_protesis("mitral", protesis, crit, params, "estenosis_mitral", cat, N)
 
     n_area = None if area is None else (0 if area >= 4.0 else 1 if area > 1.5 else 2 if area >= 1.0 else 3)
     n_gm = None if gm is None else (3 if gm > 10 else 2 if gm >= 5 else 1)

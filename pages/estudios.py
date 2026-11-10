@@ -20,6 +20,7 @@ if not st.session_state.get("autenticado", False):
         st.switch_page("app.py")                   # Nombre del script principal
     st.stop()     
 
+import html
 import os
 import tempfile
 import io
@@ -37,10 +38,25 @@ except ImportError:
 import pandas as pd
 from datetime import date, datetime
 
-from database.database import SessionLocal
+from database.database import SessionLocal, asegurar_bd
 from database.models import Paciente, Estudio, Variable, Medicion
+
+asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 from utils.pdf_informe import generar_pdf_desde_historial
+from utils.pdf_informe import (
+    _normalizar_codigo as _normalizar_codigo_informe,
+    construir_informe_automatico as motor_informe,
+    informe_a_texto_agrupado,
+)
 from utils.valvulopatias import evaluar_valvulopatias, conclusion_global_valvular
+from utils.validacion import (
+    DECIMALES_MAX,
+    advertencia_rango,
+    inyectar_bloqueo_numerico,
+    permite_negativo,
+    texto_normalizado,
+    validar_numero,
+)
 
 # Inicializar la lista de médicos en la memoria de la sesión
 if "lista_medicos_bd" not in st.session_state:
@@ -253,7 +269,13 @@ section[data-testid="stMain"] > div:first-child {
 # =====================================================================
 _session = SessionLocal()
 try:
-    variables_db = _session.query(Variable).order_by(Variable.categoria, Variable.orden).all()
+    # Orden global de la columna Orden del Excel: así las pestañas y
+    # subsecciones aparecen en el orden clínico definido allí (no alfabético).
+    variables_db = (
+        _session.query(Variable)
+        .order_by(Variable.orden.is_(None), Variable.orden, Variable.categoria)
+        .all()
+    )
     variables_por_codigo = {v.codigo: v for v in variables_db}
     
     # Estructura: { "Nombre Pestaña": { "Nombre Subsección": [Variables] } }
@@ -276,7 +298,7 @@ try:
         if cat_lower.startswith("valvula") or cat_lower.startswith("válvula"):
             tab_padre = "Válvulas"
         elif cat_lower in categorias_ventriculos:
-            tab_padre = "Ventrículos"
+            tab_padre = "Cavidades y aorta"
         else:
             tab_padre = cat_original
             
@@ -314,8 +336,8 @@ def _normalizar_texto(valor):
 
 
 # --- Validación de tipos de variables ---------------------------------
-# Acepta: 70, -3, +12, 12.5, 12,5, .5   Rechaza: letras, "12,5,3", "1e3", vacío
-_PATRON_NUMERO = re.compile(r"^[+-]?(\d+([.]\d*)?|[.]\d+)$")
+# Las reglas numéricas (punto decimal, decimales, negativos) están en
+# utils/validacion.py, compartidas con pages/historial.py.
 
 
 _SINONIMOS_TIPO = {
@@ -345,22 +367,37 @@ def tipo_variable(variable):
     return _SINONIMOS_TIPO.get(t, t)
 
 
-def convertir_numero(valor):
+def validar_valor_variable(variable, valor):
+    """
+    Valida el valor de una variable de tipo "numero" con sus reglas:
+    punto decimal, máximo DECIMALES_MAX decimales y signo negativo solo
+    si la variable lo admite (strain). Devuelve (numero, error).
+    """
+    return validar_numero(
+        valor,
+        permitir_negativo=permite_negativo(getattr(variable, "codigo", None)),
+        decimales=DECIMALES_MAX,
+        nombre=getattr(variable, "nombre", None) or "El valor",
+    )
+
+
+def convertir_numero(valor, variable=None):
     """
     Convierte lo que escribió el usuario en una variable de tipo "numero".
 
     - Sin parte decimal  -> int    ("70"   -> 70)
-    - Con parte decimal  -> float  ("12,5" -> 12.5 ; "70,0" -> 70.0)
+    - Con parte decimal  -> float  ("12.5" o "12,5" -> 12.5)
     - Cualquier otra cosa -> None  (dato inválido)
+
+    Con `variable`, se aplican sus reglas (negativos, decimales). Sin
+    ella, se acepta cualquier número con signo y hasta DECIMALES_MAX
+    decimales.
     """
-    if valor is None or isinstance(valor, bool):
-        return None
-    if isinstance(valor, (int, float)):
-        return valor
-    texto = str(valor).strip().replace(",", ".")
-    if not _PATRON_NUMERO.match(texto):
-        return None
-    return float(texto) if "." in texto else int(texto)
+    if variable is not None:
+        numero, _ = validar_valor_variable(variable, valor)
+        return numero
+    numero, _ = validar_numero(valor, permitir_negativo=True, decimales=DECIMALES_MAX)
+    return numero
 
 
 def convertir_categoria(valor, opciones_txt):
@@ -388,7 +425,7 @@ def asignar_valor_medicion(med, variable, valor):
     """
     med.valor_entero = med.valor_num = med.valor_texto = None
     if tipo_variable(variable) == "numero":
-        numero = convertir_numero(valor)
+        numero = convertir_numero(valor, variable)
         if numero is None:
             return False
         if isinstance(numero, int):
@@ -690,8 +727,8 @@ def formatear_telefono_callback():
 # ==================================================
 # CAMPOS GENERALES DEL ESTUDIO (peso, talla, PAS, PAD, FC)
 # No están en la tabla `variables`, por eso aquí se define su tipo.
-# Solo se exige que sean números (sin letras); no hay mínimos ni máximos.
-#   float -> admite decimales (70,5)      int -> solo enteros (120)
+# Solo se exige que sean números positivos; no hay mínimos ni máximos.
+#   float -> hasta DECIMALES_MAX decimales (70.5)    int -> solo enteros (120)
 # ==================================================
 CAMPOS_GENERALES = {
     "peso_input":  {"nombre": "Peso (kg)",  "tipo": "float"},
@@ -700,6 +737,10 @@ CAMPOS_GENERALES = {
     "pad":         {"nombre": "PAD (mmHg)", "tipo": "int"},
     "fcia":        {"nombre": "FC (lpm)",   "tipo": "int"},
 }
+
+
+def _decimales_campo_general(key):
+    return 0 if CAMPOS_GENERALES[key]["tipo"] == "int" else DECIMALES_MAX
 
 
 def validar_campo_general(key, texto=None):
@@ -713,27 +754,31 @@ def validar_campo_general(key, texto=None):
     if texto is None or str(texto).strip() == "":
         return None, None
 
-    numero = convertir_numero(texto)
-    if numero is None:
-        return None, f"{cfg['nombre']}: «{texto}» no es un número."
+    numero, error = validar_numero(
+        texto,
+        permitir_negativo=False,
+        decimales=_decimales_campo_general(key),
+        nombre=cfg["nombre"],
+    )
+    if error:
+        return None, error
 
-    if cfg["tipo"] == "int":
-        if isinstance(numero, float):
-            if not numero.is_integer():
-                return None, f"{cfg['nombre']} debe ser un número entero (sin decimales)."
-            numero = int(numero)
-    else:
-        numero = float(numero)
-
+    numero = int(numero) if cfg["tipo"] == "int" else float(numero)
     return numero, None
 
 
 def on_change_campo_general(key):
-    """Si el dato no es válido, se borra y se avisa. Peso/talla recalculan ASC e IMC."""
-    _, error = validar_campo_general(key)
+    """
+    Si el dato no es válido, se borra y se avisa; si es válido queda con
+    punto decimal ("70,5" -> "70.5"). Peso/talla recalculan ASC e IMC.
+    """
+    texto = st.session_state.get(key, "")
+    numero, error = validar_campo_general(key)
     if error:
         st.session_state[key] = ""
         st.toast(error, icon="⚠️")
+    elif numero is not None:
+        st.session_state[key] = texto_normalizado(numero, texto)
     if key in ("peso_input", "talla_input"):
         calcular_asc_imc()
 
@@ -746,7 +791,9 @@ def calcular_asc_imc():
         t, _ = validar_campo_general("talla_input")
         if p is not None and t is not None:
             if p > 0 and t > 0:
-                asc_calc = 0.007184 * (p ** 0.425) * (t ** 0.725)
+                # Mosteller: misma fórmula con que ASE 2015 indexó sus valores
+                # de referencia (Lang 2015, apéndice) y la del PDF/Historial.
+                asc_calc = ((p * t) / 3600) ** 0.5
                 imc_calc = p / ((t / 100) ** 2)
                 st.session_state.asc_val = f"{asc_calc:.2f}"
                 st.session_state.imc_val = f"{imc_calc:.2f}"
@@ -764,6 +811,15 @@ if "asc_val" not in st.session_state:
     st.session_state.asc_val = ""
 if "imc_val" not in st.session_state:
     st.session_state.imc_val = ""
+
+
+# Widgets numéricos de esta ejecución de la página: {key: {"neg": bool, "dec": int}}.
+# Se llena al dibujar los campos y se envía al navegador para bloquear
+# la escritura de caracteres inválidos (utils/validacion.py).
+CAMPOS_NUMERICOS_PAGINA = {
+    k: {"neg": False, "dec": 0 if cfg["tipo"] == "int" else DECIMALES_MAX}
+    for k, cfg in CAMPOS_GENERALES.items()
+}
 
 
 def renderizar_variable(variable, col_contenedor):
@@ -792,31 +848,50 @@ def renderizar_variable(variable, col_contenedor):
                 default_temporal = st.session_state["borrador_estudio"].get(key, "")
                 st.session_state[key] = default_temporal
 
-            def _guardar_variable_y_calcular(codigo=variable.codigo, es_numero=(tipo_variable(variable) == "numero")):
+            def _guardar_variable_y_calcular(codigo=variable.codigo, es_numero=(tipo_variable(variable) == "numero"), var_obj=variable):
                 k = f"var_{codigo}"
                 nuevo = st.session_state.get(k, "")
-                # Variables numéricas: si lo escrito no es un número, se rechaza
-                # y el campo vuelve a su último valor válido.
-                if es_numero and str(nuevo).strip() and convertir_numero(nuevo) is None:
-                    st.session_state[k] = st.session_state["borrador_estudio"].get(k, "")
-                    st.toast(f"«{nuevo}» no es un número. Use solo cifras (ej.: 70 o 12,5).", icon="⚠️")
-                    return
+                # Variables numéricas: si lo escrito no es válido, se rechaza
+                # y el campo vuelve a su último valor válido. Si es válido,
+                # queda escrito con punto decimal.
+                if es_numero and str(nuevo).strip():
+                    numero, error = validar_valor_variable(var_obj, nuevo)
+                    if error:
+                        st.session_state[k] = st.session_state["borrador_estudio"].get(k, "")
+                        st.toast(error, icon="⚠️")
+                        return
+                    nuevo = texto_normalizado(numero, nuevo)
+                    st.session_state[k] = nuevo
                 st.session_state["borrador_estudio"][k] = nuevo
                 on_numeric_change(codigo)
                 st.session_state["borrador_estudio"][f"var_{codigo}"] = st.session_state.get(f"var_{codigo}", "")
 
             if tipo_variable(variable) == "numero":
+                admite_negativo = permite_negativo(variable.codigo)
                 valor = st.text_input(
                     "", key=key, label_visibility="collapsed",
-                    placeholder="Ej.: 70 o 12,5",
                     on_change=_guardar_variable_y_calcular
                 )
-                if str(valor).strip() and convertir_numero(valor) is None:
-                    st.markdown(
-                        "<div style='color:#d33; font-size:11px'>⚠ Solo números "
-                        "enteros o decimales (ej.: 70 o 12,5)</div>",
-                        unsafe_allow_html=True,
-                    )
+                CAMPOS_NUMERICOS_PAGINA[key] = {"neg": admite_negativo, "dec": DECIMALES_MAX}
+                if str(valor).strip():
+                    numero_ing, error_ing = validar_valor_variable(variable, valor)
+                    if error_ing:
+                        st.markdown(
+                            f"<div style='color:#d33; font-size:11px'>⚠ {html.escape(error_ing)}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        aviso = advertencia_rango(
+                            numero_ing,
+                            getattr(variable, "valor_minimo", None),
+                            getattr(variable, "valor_maximo", None),
+                            variable.unidad or "",
+                        )
+                        if aviso:
+                            st.markdown(
+                                f"<div style='color:#C05621; font-size:11px'>⚠ {html.escape(aviso)}</div>",
+                                unsafe_allow_html=True,
+                            )
 
             elif tipo_variable(variable) == "categoria":
                 opciones = ([""] + [x.strip() for x in variable.opciones.split(";")] if variable.opciones else [""])
@@ -919,7 +994,11 @@ if busqueda and not df_pacientes_todos.empty:
             rut_seleccionado = rut_filtrado  # Prioriza el paciente seleccionado en la búsqueda
             if st.session_state.get("paciente_estudio_activo") != rut_filtrado:
                 _cambiar_paciente_temporal(rut_filtrado)
-                st.session_state["selectbox_todos_estudios"] = rut_filtrado
+                # El selector principal ya se dibujó en esta ejecución y Streamlit
+                # no permite cambiar su valor ahora: se sincroniza al inicio de la
+                # siguiente (mismo mecanismo que "paciente_recien_creado").
+                st.session_state["paciente_recien_creado"] = rut_filtrado
+                st.rerun()
     else:
         st.warning("No se encontraron pacientes que coincidan con la búsqueda.")
 
@@ -1366,18 +1445,18 @@ with tabs[0]:
         destino = st.text_input("Servicio de destino", placeholder="Ej: HRT, CESFAM, etc.", key="destino")
 
     cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8 = st.columns([1, 1, 1, 1, 1, 1, 2, 1])
-    with cv1: peso = st.text_input("PESO (kg)", key="peso_input", placeholder="70,5",
+    with cv1: peso = st.text_input("PESO (kg)", key="peso_input",
                                    on_change=on_change_campo_general, args=("peso_input",))
-    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input", placeholder="165",
+    with cv2: talla = st.text_input("TALLA (cm)", key="talla_input",
                                     on_change=on_change_campo_general, args=("talla_input",))
     with cv3: asc = st.text_input("ASC", value=st.session_state.asc_val, disabled=True)
     with cv4: imc = st.text_input("IMC", value=st.session_state.imc_val, disabled=True)
-    with cv5: pas = st.text_input("PAS", key="pas", placeholder="120",
+    with cv5: pas = st.text_input("PAS", key="pas",
                                   on_change=on_change_campo_general, args=("pas",))
-    with cv6: pad = st.text_input("PAD", key="pad", placeholder="80",
+    with cv6: pad = st.text_input("PAD", key="pad",
                                   on_change=on_change_campo_general, args=("pad",))
     with cv7: ritmo = st.selectbox("Ritmo", ["", "Sinusal", "Sinusal con ESV", "Sinusal con EV", "Taquicardia sinusal", "Braquicardia sinusal", "Fibrilación auricular", "Flutter auricular", "Marcapaso", "Otro"], key="ritmo")
-    with cv8: fcia = st.text_input("FCia", key="fcia", placeholder="72",
+    with cv8: fcia = st.text_input("FCia", key="fcia",
                                    on_change=on_change_campo_general, args=("fcia",))
 
     observaciones = st.text_area("Observaciones Generales", key="observaciones")
@@ -1394,7 +1473,7 @@ for tab, nombre_tab in zip(tabs[1:num_categorias_dinamicas+1], categorias_tabs[1
         subcategorias = tabs_estructura[nombre_tab]
         
         for nombre_subcat, vars_categoria in subcategorias.items():
-            if nombre_tab in ["Válvulas", "Ventrículos"]:
+            if nombre_tab in ["Válvulas", "Cavidades y aorta"]:
                 st.markdown(f"<h5 style='color:#2B6CB0; margin-top:5px; margin-bottom:0px;'>{nombre_subcat}</h5>", unsafe_allow_html=True)
                 st.markdown("<hr style='margin-top: 5px; margin-bottom: 15px;'>", unsafe_allow_html=True)
 
@@ -1403,6 +1482,10 @@ for tab, nombre_tab in zip(tabs[1:num_categorias_dinamicas+1], categorias_tabs[1
                 cols = st.columns(3)
                 for variable, col in zip(grupo_fila, cols):
                     valores[variable.codigo] = renderizar_variable(variable, col)
+
+# Bloqueo al teclear en todos los campos numéricos de la página
+# (generales + variables). La validación de Python sigue como respaldo.
+inyectar_bloqueo_numerico(CAMPOS_NUMERICOS_PAGINA)
 
 # --- ÚLTIMA PESTAÑA: INFORME CLÍNICO EDITABLE ---
 def obtener_valores_reales():
@@ -1439,317 +1522,21 @@ def texto_cualitativo(valores_dict, *codigos):
     return _normalizar_texto(valor) if valor is not None else None
 
 
-def construir_informe_automatico(valores_dict, sexo_paciente):
-    """Genera hallazgos y conclusiones exclusivamente a partir de inputs.
-
-    No asume normalidad cuando falta una medición. Las conclusiones se
-    construyen a partir de las clasificaciones de clasificar_automatico().
+def construir_informe_automatico(valores_dict, sexo_paciente, ritmo=None, fc=None, asc=None, imc=None):
     """
-    auto = clasificar_automatico(valores_dict, sexo_paciente)
-    hallazgos = []
-    conclusiones = []
+    Redacción automática del informe en pantalla.
 
-    def agregar_hallazgo(texto):
-        if texto and texto.strip():
-            hallazgos.append(texto.strip())
-
-    def agregar_conclusion(texto):
-        if texto and texto.strip():
-            conclusiones.append(texto.strip())
-
-    # ==================================================
-    # VENTRÍCULO IZQUIERDO
-    # ==================================================
-    fevi = obtener_numero_alias(valores_dict, "FEVI", "FRACCION_EYECCION")
-    gpr = obtener_numero_alias(valores_dict, "GPR", "GPR_VI")
-    masa_idx = obtener_numero_alias(valores_dict, "MASA_VI_INDEXADA", "MASA_VI_ASC")
-    dvi_diast = obtener_numero_alias(valores_dict, "DIMENSION_DIASTOLICA_VI", "DVI_DIAST", "DVId")
-    dvi_sist = obtener_numero_alias(valores_dict, "DIMENSION_SISTOLICA_VI", "DVI_SIST", "DVIs")
-    hipertrofia = auto.get("GRADO_HIPERTROFIA_VI")
-    acortamiento = obtener_numero_alias(valores_dict, "FRACC_ACORTAMIENTO", "PORC_ACORTAMIENTO")
-    strain_vi = obtener_numero_alias(valores_dict, "STRAIN_LONGITUDINAL", "STRAIN_VI")
-
-    frases_vi = []
-    if dvi_diast is not None:
-        frases_vi.append(f"diámetro diastólico de {formato_numero(dvi_diast)} mm")
-    if dvi_sist is not None:
-        frases_vi.append(f"diámetro sistólico de {formato_numero(dvi_sist)} mm")
-    if hipertrofia and hipertrofia != "Normal":
-        frases_vi.append(f"hipertrofia {hipertrofia.lower()}" )
-    if gpr is not None:
-        frases_vi.append(f"GPR de {formato_numero(gpr, 2)}")
-    if masa_idx is not None:
-        frases_vi.append(f"masa VI indexada de {formato_numero(masa_idx, 0)} g/m²")
-
-    if frases_vi:
-        agregar_hallazgo("Ventrículo izquierdo: " + "; ".join(frases_vi) + ".")
-
-    if fevi is not None:
-        if fevi >= 55:
-            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo estimada por 2D de {formato_numero(fevi, 0)}%.")
-        elif fevi >= 50:
-            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo levemente reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
-        elif fevi >= 40:
-            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo moderadamente reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
-        else:
-            agregar_hallazgo(f"Fracción de eyección del ventrículo izquierdo reducida, estimada por 2D en {formato_numero(fevi, 0)}%.")
-        if fevi < 50:
-            agregar_conclusion(f"Disfunción sistólica del ventrículo izquierdo con FEVI de {formato_numero(fevi, 0)}%.")
-        else:
-            agregar_conclusion(f"Función sistólica global del ventrículo izquierdo conservada, con FEVI de {formato_numero(fevi, 0)}%.")
-
-    if acortamiento is not None:
-        agregar_hallazgo(f"Fracción de acortamiento de {formato_numero(acortamiento, 0)}%.")
-
-    if strain_vi is not None:
-        agregar_hallazgo(f"Strain longitudinal del ventrículo izquierdo de {formato_numero(strain_vi, 1)}%.")
-
-    if hipertrofia and hipertrofia != "Normal":
-        agregar_conclusion(f"Hipertrofia del ventrículo izquierdo {hipertrofia.lower()}.")
-
-    # ==================================================
-    # FUNCIÓN DIASTÓLICA
-    # ==================================================
-    onda_e = obtener_numero_alias(valores_dict, "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL")
-    onda_a = obtener_numero_alias(valores_dict, "ONDA_A", "ONDA_A_MITRAL", "A_MITRAL")
-    e_a = obtener_numero_alias(valores_dict, "E_A", "RELACION_E_A")
-    e_lateral = obtener_numero_alias(valores_dict, "E_PRIMA_LATERAL", "E_LATERAL", "E_PRIMA_LAT")
-    e_septal = obtener_numero_alias(valores_dict, "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP")
-    e_e = obtener_numero_alias(valores_dict, "E_E_PRIMA", "E_EPRIMA", "E_E")
-    td = obtener_numero_alias(valores_dict, "TIEMPO_DECELERACION", "T_D", "TD")
-
-    diastolica = []
-    if onda_e is not None:
-        diastolica.append(f"onda E de {formato_numero(onda_e, 2)} m/s")
-    if onda_a is not None:
-        diastolica.append(f"onda A de {formato_numero(onda_a, 2)} m/s")
-    if e_a is not None:
-        diastolica.append(f"relación E/A de {formato_numero(e_a, 2)}")
-    if td is not None:
-        diastolica.append(f"tiempo de desaceleración de {formato_numero(td, 0)} ms")
-    if e_lateral is not None:
-        diastolica.append(f"e' lateral de {formato_numero(e_lateral, 1)} cm/s")
-    if e_septal is not None:
-        diastolica.append(f"e' septal de {formato_numero(e_septal, 1)} cm/s")
-    if e_e is not None:
-        diastolica.append(f"E/e' de {formato_numero(e_e, 1)}")
-
-    if diastolica:
-        agregar_hallazgo("Función diastólica: " + "; ".join(diastolica) + ".")
-
-    if e_e is not None:
-        if e_e > 14:
-            agregar_conclusion("Hallazgos compatibles con aumento de las presiones de llenado del ventrículo izquierdo.")
-        elif e_e >= 8:
-            agregar_hallazgo("E/e' en rango intermedio; interpretar en conjunto con el resto de los parámetros de función diastólica.")
-
-    # ==================================================
-    # VENTRÍCULO DERECHO
-    # ==================================================
-    tapse = obtener_numero_alias(valores_dict, "TAPSE", "TAPSE_VD")
-    onda_s = obtener_numero_alias(valores_dict, "ONDA_S", "ONDA_S_PRIMA", "S_PRIMA")
-    diam_basal_vd = obtener_numero_alias(valores_dict, "DIAMETRO_BASAL_VD", "DIAM_BASAL_VD")
-    diam_medio_vd = obtener_numero_alias(valores_dict, "DIAMETRO_MEDIO_VD", "DIAM_MEDIO_VD")
-
-    vd = []
-    if diam_basal_vd is not None:
-        vd.append(f"diámetro basal de {formato_numero(diam_basal_vd, 0)} mm")
-    if diam_medio_vd is not None:
-        vd.append(f"diámetro medio de {formato_numero(diam_medio_vd, 0)} mm")
-    if tapse is not None:
-        vd.append(f"TAPSE de {formato_numero(tapse, 0)} mm")
-    if onda_s is not None:
-        vd.append(f"onda S' de {formato_numero(onda_s, 1)} cm/s")
-    if vd:
-        agregar_hallazgo("Ventrículo derecho: " + "; ".join(vd) + ".")
-
-    if tapse is not None and tapse < 17:
-        agregar_conclusion(f"Disminución de la función sistólica longitudinal del ventrículo derecho (TAPSE {formato_numero(tapse, 0)} mm).")
-
-    # ==================================================
-    # AURÍCULAS
-    # ==================================================
-    vol_ai = obtener_numero_alias(valores_dict, "VOLUMEN_AI")
-    grado_ai = auto.get("GRADO_DILATACION_AI")
-    if vol_ai is not None:
-        if grado_ai == "Normal":
-            agregar_hallazgo(f"Aurícula izquierda de tamaño conservado, con volumen indexado de {formato_numero(vol_ai, 0)} mL/m².")
-        else:
-            agregar_hallazgo(f"Aurícula izquierda {grado_ai.lower()}mente dilatada, con volumen indexado de {formato_numero(vol_ai, 0)} mL/m².")
-        if grado_ai and grado_ai != "Normal":
-            agregar_conclusion(f"Dilatación {grado_ai.lower()} de la aurícula izquierda.")
-
-    area_ad = obtener_numero_alias(valores_dict, "AREA_AD", "AREA_AURICULA_DERECHA")
-    if area_ad is not None:
-        agregar_hallazgo(f"Área de aurícula derecha de {formato_numero(area_ad, 0)} cm².")
-
-    # ==================================================
-    # VALVULOPATÍAS (motor único compartido con el PDF)
-    # Ver utils/valvulopatias.py: 8 valvulopatías con criterios
-    # ASE/EACVI/ESC/AHA y evaluación multiparamétrica.
-    # ==================================================
-    valvulas = evaluar_valvulopatias(valores_dict, sexo_paciente)
-    valv = {r["clave"]: r for r in valvulas}
-
-    def agregar_valvula(clave):
-        r = valv.get(clave)
-        if r:
-            agregar_hallazgo(r["texto"])
-            if r.get("conclusion"):
-                agregar_conclusion(r["conclusion"])
-
-    def _hay_protesis(texto):
-        return bool(texto) and texto.strip().lower() not in ("ausente", "no", "sin prótesis")
-
-    # ---- Válvula aórtica ----
-    vti_ao = obtener_numero_alias(valores_dict, "VTI_AORTICO", "VTI_AORTICA", "VTI_AO")
-    protesis_ao = texto_cualitativo(valores_dict, "PROTESIS_AORTICA")
-    agregar_valvula("estenosis_ao")
-    agregar_valvula("insuf_ao")
-    if vti_ao is not None:
-        agregar_hallazgo(f"VTI aórtica de {formato_numero(vti_ao, 0)} cm.")
-    if _hay_protesis(protesis_ao):
-        agregar_hallazgo(f"Prótesis aórtica: {protesis_ao}.")
-
-    # ---- Válvula mitral ----
-    protesis_mit = texto_cualitativo(valores_dict, "PROTESIS_MITRAL")
-    agregar_valvula("estenosis_mitral")
-    agregar_valvula("insuf_mit")
-    if _hay_protesis(protesis_mit):
-        agregar_hallazgo(f"Prótesis mitral: {protesis_mit}.")
-
-    # ---- Válvula tricúspide / presión pulmonar ----
-    v_it = obtener_numero_alias(valores_dict, "VELOCIDAD_MAXIMA_IT", "VEL_MAX_IT", "V_MAX_IT")
-    gdte_it = obtener_numero_alias(valores_dict, "GRADIENTE_MAXIMO_IT", "GDTE_MAX_IT")
-    vci = obtener_numero_alias(valores_dict, "DIAMETRO_VCI", "VENA_CAVA_INFERIOR", "VCI")
-    colapso_vci = obtener_numero_alias(valores_dict, "PUNTAJE_COLAPSO_VCI", "PORCENTAJE_COLAPSO_VCI", "COLAPSO_VCI", "PTJE_VCI")
-    psap = obtener_numero_alias(valores_dict, "PSAP")
-
-    agregar_valvula("estenosis_it")
-    agregar_valvula("insuf_it")
-
-    presion = []
-    if v_it is not None:
-        presion.append(f"Vmax IT {formato_numero(v_it, 1)} m/s")
-    if gdte_it is not None:
-        presion.append(f"gradiente máximo IT {formato_numero(gdte_it, 0)} mmHg")
-    if psap is not None:
-        presion.append(f"PSAP estimada de {formato_numero(psap, 0)} mmHg")
-    if presion:
-        agregar_hallazgo("Presión pulmonar: " + "; ".join(presion) + ".")
-
-    if vci is not None:
-        texto_vci = f"Vena cava inferior de {formato_numero(vci, 0)} mm"
-        if colapso_vci is not None:
-            texto_vci += f", con colapso inspiratorio de {formato_numero(colapso_vci, 0)}%"
-        agregar_hallazgo(texto_vci + ".")
-
-    ep = valv.get("estenosis_pulmonar")
-    hay_ep = bool(ep and ep.get("nivel") and ep["nivel"] >= 2)
-    if psap is not None and hay_ep:
-        agregar_conclusion(f"PSAP estimada de {formato_numero(psap, 0)} mmHg: con estenosis pulmonar asociada "
-                           "refleja la presión sistólica del VD y no equivale a hipertensión pulmonar.")
-    elif psap is not None:
-        grado_psap = auto.get("PSAP_GRADO")
-        if grado_psap and grado_psap != "Normal":
-            agregar_conclusion(f"Hipertensión pulmonar {grado_psap.lower()} según PSAP estimada de {formato_numero(psap, 0)} mmHg.")
-        elif grado_psap == "Normal":
-            agregar_conclusion(f"PSAP estimada dentro de rango no sugestivo de hipertensión pulmonar ({formato_numero(psap, 0)} mmHg).")
-
-    # ---- Válvula pulmonar ----
-    tronco_ap = obtener_numero_alias(valores_dict, "TRONCO_ARTERIA_PULMONAR")
-    tap = obtener_numero_alias(valores_dict, "TIEMPO_ACELERACION_PULMONAR", "TAP")
-    vti_ts = obtener_numero_alias(valores_dict, "VTI_TSVD", "VTI_TSVD_PULMONAR")
-    rvp = obtener_numero_alias(valores_dict, "RESISTENCIA_VASCULAR_PULMONAR", "RVP")
-
-    agregar_valvula("estenosis_pulmonar")
-    agregar_valvula("insuf_pulmonar")
-
-    pulmonar = []
-    if tronco_ap is not None:
-        pulmonar.append(f"tronco de la arteria pulmonar de {formato_numero(tronco_ap, 0)} mm")
-    if tap is not None:
-        pulmonar.append(f"tiempo de aceleración {formato_numero(tap, 0)} ms")
-    if vti_ts is not None:
-        pulmonar.append(f"VTI TSVD {formato_numero(vti_ts, 0)} cm")
-    if rvp is not None:
-        pulmonar.append(f"RVP {formato_numero(rvp, 1)} UW")
-    if pulmonar:
-        agregar_hallazgo("Arteria pulmonar: " + "; ".join(pulmonar) + ".")
-
-    global_valv = conclusion_global_valvular(valvulas)
-    if global_valv:
-        agregar_conclusion(global_valv)
-
-    # ==================================================
-    # PERICARDIO
-    # ==================================================
-    derrame = obtener_numero_alias(valores_dict, "MAGNITUD_DERRAME_PERICARDICO")
-    pericardio = texto_cualitativo(valores_dict, "PERICARDIO")
-    taponamiento = texto_cualitativo(valores_dict, "TAPONAMIENTO")
-    if derrame is not None:
-        grado_derrame = auto.get("GRADO_DERRAME_PERICARDICO")
-        if grado_derrame == "Sin derrame":
-            agregar_hallazgo("Pericardio: sin derrame pericárdico.")
-            agregar_conclusion("Sin derrame pericárdico.")
-        else:
-            agregar_hallazgo(f"Pericardio: derrame {grado_derrame.lower()}, con magnitud máxima de {formato_numero(derrame, 0)} mm.")
-            agregar_conclusion(f"Derrame pericárdico {grado_derrame.lower()}.")
-    elif pericardio:
-        agregar_hallazgo(f"Pericardio: {pericardio}.")
-    if taponamiento:
-        agregar_hallazgo(f"Taponamiento: {taponamiento}.")
-
-    # ==================================================
-    # DATOS ADICIONALES QUE SÍ EXISTAN
-    # ==================================================
-    raiz_aorta = obtener_numero_alias(valores_dict, "RAIZ_AORTICA")
-    aorta_asc = obtener_numero_alias(valores_dict, "AORTA_ASCENDENTE")
-    arco = obtener_numero_alias(valores_dict, "ARCO_AORTICO")
-    septum = obtener_numero_alias(valores_dict, "SEPTUM")
-    pp = obtener_numero_alias(valores_dict, "P_Posterior", "PARED_POSTERIOR")
-    vfd = obtener_numero_alias(valores_dict, "VFD", "VOLUMEN_FIN_DIASTOLE")
-    vfs = obtener_numero_alias(valores_dict, "VFS", "VOLUMEN_FIN_SISTOLE")
-    vs = obtener_numero_alias(valores_dict, "VOLUMEN_LATIDO", "VOL_LATIDO")
-    vsi = obtener_numero_alias(valores_dict, "VOLUMEN_LATIDO_INDEXADO", "VS_INDEX")
-
-    aorta_extra = []
-    if raiz_aorta is not None:
-        aorta_extra.append(f"raíz aórtica {formato_numero(raiz_aorta, 0)} mm")
-    if aorta_asc is not None:
-        aorta_extra.append(f"aorta ascendente {formato_numero(aorta_asc, 0)} mm")
-    if arco is not None:
-        aorta_extra.append(f"arco aórtico {formato_numero(arco, 0)} mm")
-    if aorta_extra:
-        agregar_hallazgo("Aorta: " + "; ".join(aorta_extra) + ".")
-
-    if septum is not None or pp is not None:
-        partes = []
-        if septum is not None:
-            partes.append(f"septum {formato_numero(septum, 0)} mm")
-        if pp is not None:
-            partes.append(f"pared posterior {formato_numero(pp, 0)} mm")
-        agregar_hallazgo("Grosor parietal del VI: " + "; ".join(partes) + ".")
-
-    if vfd is not None or vfs is not None or vs is not None or vsi is not None:
-        partes = []
-        if vfd is not None:
-            partes.append(f"VFD {formato_numero(vfd, 0)} mL")
-        if vfs is not None:
-            partes.append(f"VFS {formato_numero(vfs, 0)} mL")
-        if vs is not None:
-            partes.append(f"volumen latido {formato_numero(vs, 0)} mL")
-        if vsi is not None:
-            partes.append(f"volumen latido indexado {formato_numero(vsi, 0)} mL/m²")
-        agregar_hallazgo("Volúmenes ventriculares: " + "; ".join(partes) + ".")
-
-    # Si no se ingresó absolutamente nada, no inventar un informe.
-    if not hallazgos:
-        hallazgos = ["No se han ingresado mediciones suficientes para generar hallazgos automáticos."]
-    if not conclusiones:
-        conclusiones = ["No se han ingresado datos suficientes para generar conclusiones automáticas."]
-
-    return "\n\n".join(hallazgos), "\n".join(f"{i}.- {c}" for i, c in enumerate(conclusiones, 1))
+    Usa el MISMO motor que el PDF (utils/pdf_informe.py), para que la
+    pestaña "Informe Clínico" y el PDF digan exactamente lo mismo.
+    No asume normalidad cuando falta una medición.
+    """
+    valores = {
+        _normalizar_codigo_informe(k): v
+        for k, v in valores_dict.items()
+        if v is not None and str(v).strip() != ""
+    }
+    resultado = motor_informe(valores, sexo_paciente, ritmo=ritmo, fc=fc, asc=asc, imc=imc)
+    return informe_a_texto_agrupado(resultado)
 
 
 def _grado_integrado_aortico(auto):
@@ -1806,7 +1593,14 @@ with tabs[-1]:
 
     valores_reales = obtener_valores_reales()
     sexo_paciente = st.session_state.get("paciente_existente_sexo") or st.session_state.get("sexo_input", "")
-    texto_automatico_findings, texto_automatico_conclusiones = construir_informe_automatico(valores_reales, sexo_paciente)
+    texto_automatico_findings, texto_automatico_conclusiones = construir_informe_automatico(
+        valores_reales,
+        sexo_paciente,
+        ritmo=st.session_state.get("ritmo"),
+        fc=st.session_state.get("fcia"),
+        asc=st.session_state.get("asc_val"),
+        imc=st.session_state.get("imc_val"),
+    )
 
     # Session State evita que Streamlit borre las modificaciones manuales
     # del médico cada vez que se produce un rerun.
@@ -1965,6 +1759,11 @@ def guardar_informe_definitivo():
         st.error("❌ Debe buscar y seleccionar un paciente existente antes de guardar el informe.")
         return False
 
+    # "Seleccione" es el texto inicial del selector, no un médico.
+    if not str(medico or "").strip() or str(medico).strip() in ("Seleccione", "Otro..."):
+        st.error("❌ Seleccione el médico responsable antes de guardar el informe.")
+        return False
+
     for codigo, valor in valores.items():
         variable = variables_por_codigo[codigo]
         if variable.obligatoria == "SI" and str(valor).strip() == "":
@@ -1982,8 +1781,10 @@ def guardar_informe_definitivo():
         if valor is None or str(valor).strip() == "":
             continue
         variable = variables_por_codigo[codigo]
-        if tipo_variable(variable) == "numero" and convertir_numero(valor) is None:
-            invalidas.append(f"{variable.nombre}: «{valor}» no es un número")
+        if tipo_variable(variable) == "numero":
+            _, error_num = validar_valor_variable(variable, valor)
+            if error_num:
+                invalidas.append(error_num)
         elif tipo_variable(variable) == "categoria" and convertir_categoria(valor, variable.opciones) is None:
             invalidas.append(f"{variable.nombre}: «{valor}» no es una opción válida")
     if invalidas:

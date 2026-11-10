@@ -34,8 +34,10 @@ import numpy as np
 import io
 from datetime import date, datetime
 
-from database.database import SessionLocal
+from database.database import SessionLocal, asegurar_bd
 from database.models import Paciente, Estudio, Medicion, Variable
+
+asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 
 st.title("📥 Exportación de Base de Datos para Investigación")
 
@@ -116,12 +118,28 @@ try:
             # el mismo nombre (ej. "Onda E" en Válvula Mitral y en Válvula Tricúspide);
             # pivotar por nombre las mezclaría en una sola columna y perdería datos.
             mediciones_db = session.query(
-                Medicion.estudio_id, Medicion.codigo_variable, Medicion.valor_num, Medicion.valor_texto
+                Medicion.estudio_id, Medicion.codigo_variable,
+                Medicion.valor_entero, Medicion.valor_num, Medicion.valor_texto
             ).all()
 
             if mediciones_db:
-                df_med = pd.DataFrame(mediciones_db)
-                df_med['valor_final'] = df_med['valor_num'].astype(object).fillna(df_med['valor_texto'])
+                # Cada medición usa UNA de las tres columnas (entero, real o texto).
+                # Se arma el valor final fila a fila para que los enteros sigan
+                # siendo enteros (70 y no 70.0) en el Excel exportado.
+                df_med = pd.DataFrame(
+                    [
+                        {
+                            "estudio_id": m.estudio_id,
+                            "codigo_variable": m.codigo_variable,
+                            "valor_final": (
+                                int(m.valor_entero) if m.valor_entero is not None
+                                else m.valor_num if m.valor_num is not None
+                                else m.valor_texto
+                            ),
+                        }
+                        for m in mediciones_db
+                    ]
+                )
 
                 df_ancha_mediciones = df_med.pivot_table(
                     index='estudio_id',

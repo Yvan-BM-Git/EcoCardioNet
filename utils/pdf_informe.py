@@ -256,36 +256,53 @@ def _cat(valores: Dict[str, Any], *codigos: str) -> Optional[str]:
 # INTERPRETACIÓN DE FEVI
 # ============================================================
 
-def interpretar_fevi(fevi: Optional[float]) -> Optional[Dict[str, str]]:
+# ASE/EACVI 2015 (Lang, tabla 6, FEVI biplano): normal H 52–72 % / M 54–74 %;
+# alteración leve H 41–51 / M 41–53; moderada 30–40; severa <30.
+# Sexo desconocido: se usa el límite femenino (54 %), el más sensible.
+FEVI_LIM_INF = {True: 52.0, False: 54.0, None: 54.0}
+FEVI_LIM_SUP = {True: 72.0, False: 74.0, None: 74.0}
+
+
+def interpretar_fevi(fevi: Optional[float], sexo: Optional[str] = None) -> Optional[Dict[str, str]]:
     if fevi is None:
         return None
 
+    hombre = _es_hombre(sexo)
+    lim_inf = FEVI_LIM_INF[hombre]
+    f = _fmt(fevi, 0)
+
     # Se utiliza una única clasificación para Hallazgos y Conclusiones.
-    if fevi >= 55:
+    if fevi >= lim_inf:
+        if fevi > FEVI_LIM_SUP[hombre]:
+            return {
+                "estado": "conservada",
+                "hallazgo": f"Fracción de eyección del ventrículo izquierdo de {f}%, sobre el rango normal (función hiperdinámica).",
+                "conclusion": f"Función sistólica global del ventrículo izquierdo conservada e hiperdinámica, con FEVI de {f}%.",
+            }
         return {
             "estado": "conservada",
-            "hallazgo": f"Fracción de eyección del ventrículo izquierdo conservada, estimada por 2D en {_fmt(fevi, 0)}%.",
-            "conclusion": f"Función sistólica global del ventrículo izquierdo conservada, con FEVI de {_fmt(fevi, 0)}%.",
+            "hallazgo": f"Fracción de eyección del ventrículo izquierdo conservada, estimada por 2D en {f}%.",
+            "conclusion": f"Función sistólica global del ventrículo izquierdo conservada, con FEVI de {f}%.",
         }
 
-    if fevi >= 50:
+    if fevi >= 41:
         return {
             "estado": "levemente_reducida",
-            "hallazgo": f"Fracción de eyección del ventrículo izquierdo levemente reducida, estimada por 2D en {_fmt(fevi, 0)}%.",
-            "conclusion": f"Función sistólica global del ventrículo izquierdo levemente reducida, con FEVI de {_fmt(fevi, 0)}%.",
+            "hallazgo": f"Fracción de eyección del ventrículo izquierdo levemente reducida, estimada por 2D en {f}%.",
+            "conclusion": f"Disfunción sistólica global leve del ventrículo izquierdo, con FEVI de {f}%.",
         }
 
-    if fevi >= 40:
+    if fevi >= 30:
         return {
             "estado": "moderadamente_reducida",
-            "hallazgo": f"Fracción de eyección del ventrículo izquierdo moderadamente reducida, estimada por 2D en {_fmt(fevi, 0)}%.",
-            "conclusion": f"Disfunción sistólica global del ventrículo izquierdo de grado moderado, con FEVI de {_fmt(fevi, 0)}%.",
+            "hallazgo": f"Fracción de eyección del ventrículo izquierdo moderadamente reducida, estimada por 2D en {f}%.",
+            "conclusion": f"Disfunción sistólica global moderada del ventrículo izquierdo, con FEVI de {f}%.",
         }
 
     return {
-        "estado": "reducida",
-        "hallazgo": f"Fracción de eyección del ventrículo izquierdo reducida, estimada por 2D en {_fmt(fevi, 0)}%.",
-        "conclusion": f"Disfunción sistólica global del ventrículo izquierdo, con FEVI de {_fmt(fevi, 0)}%.",
+        "estado": "severamente_reducida",
+        "hallazgo": f"Fracción de eyección del ventrículo izquierdo severamente reducida, estimada por 2D en {f}%.",
+        "conclusion": f"Disfunción sistólica global severa del ventrículo izquierdo, con FEVI de {f}%.",
     }
 
 
@@ -346,6 +363,14 @@ def interpretar_tapse(tapse: Optional[float], s_prime: Optional[float] = None) -
 # ============================================================
 # AURÍCULA IZQUIERDA
 # ============================================================
+
+# Estado de interpretar_ai() -> adjetivo para "Dilatación ___ de la AI".
+_GRADO_DILATACION_AI = {
+    "levemente_dilatada": "leve",
+    "moderadamente_dilatada": "moderada",
+    "severamente_dilatada": "severa",
+}
+
 
 def interpretar_ai(vol_indexado: Optional[float]) -> Optional[str]:
     if vol_indexado is None:
@@ -913,8 +938,8 @@ def evaluar_taponamiento(valores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
     taponamiento_bool = _texto_bool(taponamiento_input)
 
-    vci = _num(valores, "VENA_CAVA_INFERIOR", "VCI")
-    colapso_vci = _num(valores, "PORCENTAJE_COLAPSO_VCI", "PTJE_VCI", "COLAPSO_VCI")
+    vci = _num(valores, "DIAMETRO_VCI", "VENA_CAVA_INFERIOR", "VCI")
+    colapso_vci = _num(valores, "PUNTAJE_COLAPSO_VCI", "PORCENTAJE_COLAPSO_VCI", "PTJE_VCI", "COLAPSO_VCI")
     tapse = _num(valores, "TAPSE", "TAPSE_VD")
     psap = _num(valores, "PSAP")
 
@@ -1007,11 +1032,11 @@ def interpretar_aorta(
 # ============================================================
 
 def evaluar_constriccion_pericardica(valores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    pericardio = _cat(valores, "PERICARDIO", "DESCRIPCION_PERICARDIO")
+    pericardio = _cat(valores, "GRADO_DERRAME_PERICARDICO", "PERICARDIO", "DESCRIPCION_PERICARDIO")
     derrame = _num(valores, "MAGNITUD_DERRAME_PERICARDICO", "MAGNITUD_DERRAME")
     e_lateral = _num(valores, "E_PRIMA_LATERAL", "E_LATERAL", "E_PRIMA_LAT")
     e_septal = _num(valores, "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP")
-    vci = _num(valores, "VENA_CAVA_INFERIOR", "VCI")
+    vci = _num(valores, "DIAMETRO_VCI", "VENA_CAVA_INFERIOR", "VCI")
     tapse = _num(valores, "TAPSE", "TAPSE_VD")
     onda_e = _num(valores, "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL")
 
@@ -1057,26 +1082,372 @@ def evaluar_constriccion_pericardica(valores: Dict[str, Any]) -> Optional[Dict[s
 
 
 # ============================================================
+
+# ============================================================
+# VI: HIPERTROFIA, GEOMETRÍA Y DILATACIÓN  /  STRAIN  /  VD
+# Criterios: ASE/EACVI 2015 (Lang et al.) salvo indicación.
+# Revisar con cardiología antes de uso clínico (ver tabla de criterios).
+# ============================================================
+
+def _es_hombre(sexo: Optional[str]) -> Optional[bool]:
+    s = _normalizar_codigo(sexo)
+    if s in ("MASCULINO", "M", "HOMBRE", "H"):
+        return True
+    if s in ("FEMENINO", "F", "MUJER"):
+        return False
+    return None
+
+
+def _grado_por_cortes(valor: Optional[float], cortes: Tuple[float, float, float]) -> Optional[str]:
+    """cortes = (límite normal, límite leve, límite moderado); > último = severo."""
+    if valor is None:
+        return None
+    normal, leve, moderado = cortes
+    if valor <= normal:
+        return "normal"
+    if valor <= leve:
+        return "leve"
+    if valor <= moderado:
+        return "moderada"
+    return "severa"
+
+
+# Masa VI indexada (g/m²), método lineal
+_CORTES_MASA = {True: (115, 131, 148), False: (95, 108, 121)}
+# Volumen de fin de diástole indexado (mL/m²), Simpson biplano
+_CORTES_VFDI = {True: (74, 89, 100), False: (61, 70, 80)}
+# Diámetro diastólico del VI (mm)
+_CORTES_DVID = {True: (58, 63, 68), False: (52, 56, 61)}
+GPR_LIMITE = 0.42
+GLS_NORMAL = -18.0     # ≤ -18 % normal
+GLS_REDUCIDO = -16.0   # > -16 % reducido; entre -16 y -18 limítrofe
+VD_BASAL_MAX = 41.0    # mm
+VD_MEDIO_MAX = 35.0    # mm
+TAPSE_PSAP_MIN = 0.31  # mm/mmHg
+AD_AREA_MAX = 18.0     # cm², área de AD en 4 cámaras (ASE 2015)
+RVP_ELEVADA = 3.0      # UW (Excel: normal <3; elevada 3–5; severa >5)
+RVP_SEVERA = 5.0
+TAP_HTP = 100.0        # ms, tiempo de aceleración pulmonar (<100 sugiere HTP)
+
+
+def interpretar_geometria_vi(masa_idx, gpr, sexo):
+    """Devuelve dict con grado de hipertrofia y geometría, o None."""
+    hombre = _es_hombre(sexo)
+    if masa_idx is None or hombre is None:
+        if gpr is not None and gpr > GPR_LIMITE:
+            return {"geometria": "gpr_elevado", "grado": None}
+        return None
+    grado = _grado_por_cortes(masa_idx, _CORTES_MASA[hombre])
+    if gpr is None:
+        return {"geometria": None, "grado": grado}
+    if grado == "normal":
+        geom = "remodelado_concentrico" if gpr > GPR_LIMITE else "normal"
+    else:
+        geom = "hipertrofia_concentrica" if gpr > GPR_LIMITE else "hipertrofia_excentrica"
+    return {"geometria": geom, "grado": grado}
+
+
+def interpretar_dilatacion_vi(vfd_idx, dvid, sexo):
+    """Prioriza el volumen indexado (Simpson); si falta, usa el diámetro."""
+    hombre = _es_hombre(sexo)
+    if hombre is None:
+        return None
+    if vfd_idx is not None:
+        return {"grado": _grado_por_cortes(vfd_idx, _CORTES_VFDI[hombre]), "base": "vfdi"}
+    if dvid is not None:
+        return {"grado": _grado_por_cortes(dvid, _CORTES_DVID[hombre]), "base": "dvid"}
+    return None
+
+
+def interpretar_gls(gls):
+    if gls is None:
+        return None
+    g = -abs(gls)  # tolera que se ingrese sin signo
+    if g <= GLS_NORMAL:
+        return "normal"
+    if g <= GLS_REDUCIDO:
+        return "limitrofe"
+    return "reducido"
+
+
+def _es_ritmo_sinusal_normal(ritmo: Optional[str]) -> bool:
+    return _normalizar_codigo(ritmo) == "SINUSAL"
+
+
+# ============================================================
+# FUNCIÓN DIASTÓLICA Y PRESIÓN DE LLENADO (ASE 2025, Nagueh)
+# ============================================================
+# Ritmo sinusal (fig. 3): 3 parámetros principales
+#   1) e' reducida: septal ≤6, lateral ≤7 o promedio ≤6,5 cm/s
+#   2) E/e' elevado: promedio ≥14, septal ≥15 o lateral ≥13
+#   3) Vel. IT ≥2,8 m/s o PSAP ≥35 mmHg
+# Todos normales → PAI normal. Solo e' reducida con E/A ≤0,8 → grado I.
+# Los 3 alterados → PAI elevada. Resto (solo E/e', solo IT/PSAP, 2 de 3,
+# o e' reducida con E/A >0,8) → parámetros adicionales: LARS ≤18 % o
+# VAI indexado >34 mL/m² (≥1 presente → PAI elevada). Con PAI elevada:
+# E/A <2 → grado II; E/A ≥2 → grado III.
+# Fibrilación auricular (fig. 8): E ≥100 cm/s, E/e' septal >11,
+# IT >2,8 m/s o PSAP >35 mmHg, TD ≤160 ms. 0–1 → PAI normal; ≥3 → elevada;
+# 2 → LARS <18 % e IMC >30 (S/D venoso pulmonar no se registra):
+# 2 presentes → elevada; si no, indeterminada.
+# No aplicable: estenosis mitral de cualquier grado, IM severa, prótesis o
+# plastia mitral, constricción pericárdica, flutter auricular.
+
+DIAST_E_SEPTAL_RED = 6.0
+DIAST_E_LATERAL_RED = 7.0
+DIAST_E_PROM_RED = 6.5
+DIAST_EE_PROM = 14.0
+DIAST_EE_SEPTAL = 15.0
+DIAST_EE_LATERAL = 13.0
+DIAST_IT = 2.8
+DIAST_PSAP = 35.0
+DIAST_LARS = 18.0
+DIAST_VAI = 34.0
+
+
+def _es_fibrilacion_auricular(ritmo: Optional[str]) -> bool:
+    r = _normalizar_codigo(ritmo)
+    return "FIBRILACION" in r or r in ("FA", "FIB_AURICULAR")
+
+
+def _protesis_mitral_texto(valores: Dict[str, Any]) -> bool:
+    t = _normalizar_codigo(_cat(valores, "PROTESIS_MITRAL") or "")
+    return bool(t) and not t.startswith("AUSENTE") and t not in ("NO", "SIN", "NINGUNA")
+
+
+def evaluar_funcion_diastolica(
+    valores: Dict[str, Any],
+    ritmo: Optional[str] = None,
+    motivo_no_aplicable: Optional[str] = None,
+    imc: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Devuelve {"estado", "texto", "conclusion"} o None si no hay datos."""
+    onda_e = _num(valores, "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL")
+    e_a = _num(valores, "RELACION_E_A_MITRAL", "E_A", "RELACION_E_A")
+    onda_a = _num(valores, "ONDA_A", "ONDA_A_MITRAL", "A_MITRAL")
+    if e_a is None and onda_e and onda_a:
+        e_a = onda_e / onda_a
+    e_lat = _num(valores, "E_PRIMA_LATERAL", "E_LATERAL", "E_PRIMA_LAT")
+    e_sep = _num(valores, "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP")
+    e_prom = (e_lat + e_sep) / 2 if e_lat and e_sep else None
+    e_e = _num(valores, "RELACION_E_E_PRIMA", "E_E_PRIMA", "E_EPRIMA", "E_E")
+    e_cm = onda_e * 100 if onda_e is not None else None  # m/s → cm/s
+    if e_e is None and e_cm is not None and e_prom:
+        e_e = e_cm / e_prom
+    e_e_sep = e_cm / e_sep if e_cm is not None and e_sep else None
+    e_e_lat = e_cm / e_lat if e_cm is not None and e_lat else None
+    it = _num(valores, "VELOCIDAD_MAXIMA_IT", "VEL_MAX_IT")
+    psap = _num(valores, "PSAP", "PRESION_SISTOLICA_AP")
+    td = _num(valores, "TIEMPO_DESACELERACION_MITRAL", "TIEMPO_DECELERACION", "T_D", "TD")
+    lars = _num(valores, "STRAIN_AI_LASR", "STRAIN_AI", "LARS")
+    vai = _num(valores, "VOLUMEN_AI", "VOLUMEN_AI_INDEXADO", "VAI_INDEXADO")
+
+    if all(v is None for v in (onda_e, e_lat, e_sep, e_e)):
+        return None
+
+    if motivo_no_aplicable:
+        return {
+            "estado": "no_aplicable",
+            "texto": f"Algoritmo ASE 2025 de presión de llenado no aplicable ({motivo_no_aplicable}); "
+                     "parámetros diastólicos solo descriptivos.",
+            "conclusion": None,
+        }
+
+    def _concl_elevada(grado: Optional[str]) -> str:
+        base = "Hallazgos compatibles con aumento de las presiones de llenado del ventrículo izquierdo"
+        return f"{base} ({grado})." if grado else base + "."
+
+    # ---------------- Fibrilación auricular ----------------
+    if _es_fibrilacion_auricular(ritmo):
+        crit = []
+        if e_cm is not None:
+            crit.append((f"E {_fmt(e_cm, 0)} cm/s", e_cm >= 100))
+        if e_e_sep is not None:
+            crit.append((f"E/e' septal {_fmt(e_e_sep, 1)}", e_e_sep > 11))
+        if psap is not None:
+            crit.append((f"PSAP {_fmt(psap, 0)} mmHg", psap > DIAST_PSAP))
+        elif it is not None:
+            crit.append((f"IT {_fmt(it, 1)} m/s", it > DIAST_IT))
+        if td is not None:
+            crit.append((f"TD {_fmt(td, 0)} ms", td <= 160))
+        alterados = [t for t, a in crit if a]
+        n = len(alterados)
+        detalle = f" ({', '.join(alterados)})" if alterados else ""
+        if len(crit) < 2:
+            return {"estado": "indeterminada",
+                    "texto": "En fibrilación auricular, datos insuficientes para estimar la presión de llenado (ASE 2025).",
+                    "conclusion": None}
+        if n >= 3:
+            return {"estado": "elevada",
+                    "texto": f"En fibrilación auricular, {n} criterios de presión de llenado elevada{detalle} (ASE 2025).",
+                    "conclusion": _concl_elevada(None)}
+        if n <= 1:
+            return {"estado": "normal",
+                    "texto": f"En fibrilación auricular, {n} de {len(crit)} criterios de presión elevada{detalle}: "
+                             "presión de llenado del ventrículo izquierdo estimada normal (ASE 2025).",
+                    "conclusion": None}
+        adic = []
+        if lars is not None:
+            adic.append(abs(lars) < DIAST_LARS)
+        if imc is not None:
+            adic.append(imc > 30)
+        if sum(adic) >= 2:
+            return {"estado": "elevada",
+                    "texto": f"En fibrilación auricular, 2 criterios principales{detalle} y LARS <18 % con IMC >30 (ASE 2025).",
+                    "conclusion": _concl_elevada(None)}
+        return {"estado": "indeterminada",
+                "texto": f"En fibrilación auricular, 2 criterios principales{detalle} sin parámetros adicionales "
+                         "concluyentes: presión de llenado indeterminada (ASE 2025).",
+                "conclusion": "Presión de llenado del ventrículo izquierdo indeterminada (fibrilación auricular)."}
+
+    # ---------------- Ritmo sinusal ----------------
+    p1 = p2 = p3 = None
+    det = []
+    vals_e = [(e_sep, DIAST_E_SEPTAL_RED, "septal"), (e_lat, DIAST_E_LATERAL_RED, "lateral")]
+    if any(v is not None for v, _, _ in vals_e):
+        p1 = False
+        for v, lim, nom in vals_e:
+            if v is not None and v <= lim:
+                p1 = True
+                det.append(f"e' {nom} {_fmt(v, 1)} cm/s")
+        if e_prom is not None and e_prom <= DIAST_E_PROM_RED and not p1:
+            p1 = True
+            det.append(f"e' promedio {_fmt(e_prom, 1)} cm/s")
+    vals_ee = [(e_e, DIAST_EE_PROM, "E/e' promedio"), (e_e_sep, DIAST_EE_SEPTAL, "E/e' septal"),
+               (e_e_lat, DIAST_EE_LATERAL, "E/e' lateral")]
+    if any(v is not None for v, _, _ in vals_ee):
+        p2 = False
+        for v, lim, nom in vals_ee:
+            if v is not None and v >= lim:
+                p2 = True
+                det.append(f"{nom} {_fmt(v, 1)}")
+                break
+    if psap is not None:
+        p3 = psap >= DIAST_PSAP
+        if p3:
+            det.append(f"PSAP {_fmt(psap, 0)} mmHg")
+    elif it is not None:
+        p3 = it >= DIAST_IT
+        if p3:
+            det.append(f"IT {_fmt(it, 1)} m/s")
+
+    disponibles = [p for p in (p1, p2, p3) if p is not None]
+    alterados = sum(1 for p in disponibles if p)
+    detalle = f" ({', '.join(det)})" if det else ""
+
+    def _grado_por_ea() -> Optional[str]:
+        if e_a is None:
+            return None
+        return "disfunción diastólica grado III" if e_a >= 2 else "disfunción diastólica grado II"
+
+    def _elevada(motivo: str) -> Dict[str, Any]:
+        grado = _grado_por_ea()
+        txt = f"{motivo}: presión de llenado del ventrículo izquierdo elevada"
+        txt += f", {grado} con E/A {_fmt(e_a, 2)}" if grado else ""
+        return {"estado": "elevada", "texto": txt + " (ASE 2025).", "conclusion": _concl_elevada(grado)}
+
+    if len(disponibles) < 2:
+        return {"estado": "indeterminada",
+                "texto": "Parámetros insuficientes para aplicar el algoritmo ASE 2025 de presión de llenado "
+                         "(se requieren al menos 2 de: e', E/e', velocidad IT o PSAP).",
+                "conclusion": None}
+
+    if alterados == 0:
+        if len(disponibles) == 3:
+            return {"estado": "normal",
+                    "texto": "e', E/e' y velocidad IT/PSAP en rango normal: función diastólica normal "
+                             "con presión de llenado normal (ASE 2025).",
+                    "conclusion": None}
+        return {"estado": "normal",
+                "texto": "Parámetros diastólicos disponibles en rango normal: presión de llenado del "
+                         "ventrículo izquierdo estimada normal (evaluación incompleta, ASE 2025).",
+                "conclusion": None}
+
+    if alterados == 3:
+        return _elevada("e' reducida, E/e' y velocidad IT/PSAP elevados" + detalle)
+
+    solo_e_reducida = p1 and not p2 and not p3
+    if solo_e_reducida and e_a is not None and e_a <= 0.8:
+        return {"estado": "grado_1",
+                "texto": f"e' reducida{detalle} con E/e' y presión pulmonar normales y E/A {_fmt(e_a, 2)}: "
+                         "disfunción diastólica grado I (alteración de la relajación) con presión de llenado normal (ASE 2025).",
+                "conclusion": "Disfunción diastólica grado I (alteración de la relajación) con presión de llenado normal."}
+
+    # Parámetros adicionales
+    adic_disp, adic_pos = [], []
+    if lars is not None:
+        adic_disp.append("LARS")
+        if abs(lars) <= DIAST_LARS:
+            adic_pos.append(f"LARS {_fmt(abs(lars), 0)} %")
+    if vai is not None:
+        adic_disp.append("VAI")
+        if vai > DIAST_VAI:
+            adic_pos.append(f"VAI indexado {_fmt(vai, 0)} mL/m²")
+    if adic_pos:
+        return _elevada(f"Parámetros principales alterados{detalle} con {', '.join(adic_pos)}")
+    if adic_disp:
+        if p1:
+            return {"estado": "grado_1",
+                    "texto": f"e' reducida{detalle} sin criterios adicionales de presión elevada (LARS/VAI normales): "
+                             "disfunción diastólica grado I con presión de llenado normal (ASE 2025).",
+                    "conclusion": "Disfunción diastólica grado I (alteración de la relajación) con presión de llenado normal."}
+        return {"estado": "normal",
+                "texto": f"Parámetro aislado alterado{detalle} con LARS/VAI normales: presión de llenado "
+                         "del ventrículo izquierdo estimada normal (ASE 2025).",
+                "conclusion": None}
+    return {"estado": "indeterminada",
+            "texto": f"Parámetros principales discordantes{detalle} sin LARS ni volumen auricular para definir: "
+                     "presión de llenado indeterminada (ASE 2025).",
+            "conclusion": "Presión de llenado del ventrículo izquierdo indeterminada con los parámetros disponibles."}
+
+
+# ============================================================
 # CONSTRUCCIÓN DEL INFORME
 # ============================================================
 
 def construir_informe_automatico(
     valores: Dict[str, Any],
     sexo_paciente: Optional[str] = None,
+    ritmo: Optional[str] = None,
+    fc: Optional[Any] = None,
+    asc: Optional[Any] = None,
+    imc: Optional[Any] = None,
 ) -> ResultadoInterpretacion:
 
     resultado = ResultadoInterpretacion()
 
     # --------------------------------------------------------
+    # RITMO
+    # --------------------------------------------------------
+    ritmo_txt = _texto(ritmo)
+    fc_num = _to_float(fc)
+    if ritmo_txt:
+        texto_ritmo = f"Ritmo durante el examen: {ritmo_txt.lower()}"
+        if fc_num is not None:
+            texto_ritmo += f", frecuencia cardíaca {_fmt(fc_num, 0)} lpm"
+        _agregar_unico(resultado.hallazgos, texto_ritmo + ".", PRIORIDADES["otros"], "ritmo", categoria="otros")
+        if not _es_ritmo_sinusal_normal(ritmo_txt):
+            texto_c = f"Examen realizado en {ritmo_txt.lower()}"
+            if fc_num is not None:
+                texto_c += f" (FC {_fmt(fc_num, 0)} lpm)"
+            _agregar_unico(resultado.conclusiones, texto_c + ".", PRIORIDADES["otros"], "ritmo")
+
+    # --------------------------------------------------------
     # VI / FEVI
     # --------------------------------------------------------
     fevi = _num(valores, "FEVI", "FRACCION_EYECCION")
-    gpr = _num(valores, "GPR", "GPR_VI")
+    gpr = _num(valores, "GROSOR_PARIETAL_RELATIVO", "GPR", "GPR_VI")
     masa_idx = _num(valores, "MASA_VI_INDEXADA", "MASA_VI_ASC")
-    dvi_diast = _num(valores, "DIMENSION_DIASTOLICA_VI", "DVI_DIAST", "DVID")
-    dvi_sist = _num(valores, "DIMENSION_SISTOLICA_VI", "DVI_SIST", "DVIS")
-    strain_vi = _num(valores, "STRAIN_LONGITUDINAL", "STRAIN_VI")
-    acortamiento = _num(valores, "FRACC_ACORTAMIENTO", "PORC_ACORTAMIENTO")
+    dvi_diast = _num(valores, "DIAMETRO_VI_DIASTOLICO", "DIMENSION_DIASTOLICA_VI", "DVI_DIAST", "DVID")
+    dvi_sist = _num(valores, "DIAMETRO_VI_SISTOLICO", "DIMENSION_SISTOLICA_VI", "DVI_SIST", "DVIS")
+    strain_vi = _num(valores, "STRAIN_LONGITUDINAL_GLOBAL_VI", "STRAIN_LONGITUDINAL", "STRAIN_VI")
+    acortamiento = _num(valores, "FRACCION_ACORTAMIENTO", "FRACC_ACORTAMIENTO", "PORC_ACORTAMIENTO")
+    septum = _num(valores, "SEPTUM_INTERVENTRICULAR", "SEPTUM")
+    pared_post = _num(valores, "PARED_POSTERIOR_VI", "P_POSTERIOR", "PARED_POSTERIOR")
+    vfd = _num(valores, "VOLUMEN_FIN_DIASTOLE_VI", "VFD")
+    vfd_idx = _num(valores, "VOLUMEN_FIN_DIASTOLE_VI_INDEXADO")
+    vfs = _num(valores, "VOLUMEN_FIN_SISTOLE_VI", "VFS")
+    vfs_idx = _num(valores, "VOLUMEN_FIN_SISTOLE_VI_INDEXADO")
 
     vi_partes = []
     if dvi_diast is not None:
@@ -1087,6 +1458,14 @@ def construir_informe_automatico(
         vi_partes.append(f"masa VI indexada de {_fmt(masa_idx, 0)} g/m²")
     if gpr is not None:
         vi_partes.append(f"GPR de {_fmt(gpr, 2)}")
+    if septum is not None:
+        vi_partes.append(f"septum de {_fmt(septum, 0)} mm")
+    if pared_post is not None:
+        vi_partes.append(f"pared posterior de {_fmt(pared_post, 0)} mm")
+    if vfd is not None:
+        vi_partes.append(f"VFD de {_fmt(vfd, 0)} mL" + (f" ({_fmt(vfd_idx, 0)} mL/m²)" if vfd_idx is not None else ""))
+    if vfs is not None:
+        vi_partes.append(f"VFS de {_fmt(vfs, 0)} mL" + (f" ({_fmt(vfs_idx, 0)} mL/m²)" if vfs_idx is not None else ""))
 
     if vi_partes:
         _agregar_unico(
@@ -1097,7 +1476,45 @@ def construir_informe_automatico(
             categoria="ventriculos",
         )
 
-    fevi_resultado = interpretar_fevi(fevi)
+    # Hipertrofia y geometría
+    geo = interpretar_geometria_vi(masa_idx, gpr, sexo_paciente)
+    if geo:
+        g, grado = geo["geometria"], geo["grado"]
+        datos = "; ".join(
+            x for x in (
+                f"masa indexada {_fmt(masa_idx, 0)} g/m²" if masa_idx is not None else "",
+                f"GPR {_fmt(gpr, 2)}" if gpr is not None else "",
+            ) if x
+        )
+        texto_geo = None
+        if g == "hipertrofia_concentrica":
+            texto_geo = f"Hipertrofia concéntrica {grado} del ventrículo izquierdo ({datos})."
+        elif g == "hipertrofia_excentrica":
+            texto_geo = f"Hipertrofia excéntrica {grado} del ventrículo izquierdo ({datos})."
+        elif g is None and grado and grado != "normal":
+            texto_geo = f"Hipertrofia {grado} del ventrículo izquierdo ({datos})."
+        elif g in ("remodelado_concentrico", "gpr_elevado"):
+            texto_geo = f"Remodelado concéntrico del ventrículo izquierdo ({datos})."
+        elif g == "normal":
+            _agregar_unico(resultado.hallazgos, f"Geometría del ventrículo izquierdo normal ({datos}).",
+                           PRIORIDADES["funcion_vi"], "geometria_vi", categoria="ventriculos")
+        if texto_geo:
+            _agregar_unico(resultado.hallazgos, texto_geo, PRIORIDADES["funcion_vi"], "geometria_vi", categoria="ventriculos")
+            _agregar_unico(resultado.conclusiones, texto_geo, PRIORIDADES["funcion_vi"], "geometria_vi")
+
+    # Dilatación del VI
+    dil = interpretar_dilatacion_vi(vfd_idx, dvi_diast, sexo_paciente)
+    if dil and dil["grado"] != "normal":
+        partes_dil = []
+        if vfd_idx is not None:
+            partes_dil.append(f"VFD indexado {_fmt(vfd_idx, 0)} mL/m²")
+        if dvi_diast is not None:
+            partes_dil.append(f"diámetro diastólico {_fmt(dvi_diast, 0)} mm")
+        texto_dil = f"Dilatación {dil['grado']} del ventrículo izquierdo ({'; '.join(partes_dil)})."
+        _agregar_unico(resultado.hallazgos, texto_dil, PRIORIDADES["funcion_vi"], "dilatacion_vi", categoria="ventriculos")
+        _agregar_unico(resultado.conclusiones, texto_dil, PRIORIDADES["funcion_vi"], "dilatacion_vi")
+
+    fevi_resultado = interpretar_fevi(fevi, sexo_paciente)
     if fevi_resultado:
         _agregar_unico(
             resultado.hallazgos,
@@ -1123,24 +1540,34 @@ def construir_informe_automatico(
         )
 
     if strain_vi is not None:
-        _agregar_unico(
-            resultado.hallazgos,
-            f"Strain longitudinal del ventrículo izquierdo de {_fmt(strain_vi, 1)}%.",
-            PRIORIDADES["funcion_vi"],
-            "strain_vi",
-            categoria="ventriculos",
-        )
+        estado_gls = interpretar_gls(strain_vi)
+        gls_txt = _fmt(-abs(strain_vi), 1)
+        if estado_gls == "normal":
+            texto_gls = f"Strain longitudinal global del ventrículo izquierdo conservado ({gls_txt}%)."
+        elif estado_gls == "limitrofe":
+            texto_gls = f"Strain longitudinal global del ventrículo izquierdo en rango limítrofe ({gls_txt}%)."
+        else:
+            texto_gls = f"Strain longitudinal global del ventrículo izquierdo reducido ({gls_txt}%)."
+        _agregar_unico(resultado.hallazgos, texto_gls, PRIORIDADES["funcion_vi"], "strain_vi", categoria="ventriculos")
+        fevi_conservada = fevi_resultado is not None and fevi_resultado["estado"] == "conservada"
+        if estado_gls == "reducido" and fevi_conservada:
+            _agregar_unico(
+                resultado.conclusiones,
+                f"Strain longitudinal global reducido ({gls_txt}%) con FEVI conservada, sugerente de disfunción sistólica subclínica del ventrículo izquierdo.",
+                PRIORIDADES["funcion_vi"],
+                "gls_subclinico",
+            )
 
     # --------------------------------------------------------
     # DIÁSTOLE
     # --------------------------------------------------------
     onda_e = _num(valores, "ONDA_E", "ONDA_E_MITRAL", "E_MITRAL")
     onda_a = _num(valores, "ONDA_A", "ONDA_A_MITRAL", "A_MITRAL")
-    e_a = _num(valores, "E_A", "RELACION_E_A")
+    e_a = _num(valores, "RELACION_E_A_MITRAL", "E_A", "RELACION_E_A")
     e_lat = _num(valores, "E_PRIMA_LATERAL", "E_LATERAL", "E_PRIMA_LAT")
     e_sep = _num(valores, "E_PRIMA_SEPTAL", "E_SEPTAL", "E_PRIMA_SEP")
-    e_e = _num(valores, "E_E_PRIMA", "E_EPRIMA", "E_E")
-    td = _num(valores, "TIEMPO_DECELERACION", "T_D", "TD")
+    e_e = _num(valores, "RELACION_E_E_PRIMA", "E_E_PRIMA", "E_EPRIMA", "E_E")
+    td = _num(valores, "TIEMPO_DESACELERACION_MITRAL", "TIEMPO_DECELERACION", "T_D", "TD")
 
     diastolica = []
     if onda_e is not None:
@@ -1167,30 +1594,13 @@ def construir_informe_automatico(
             categoria="ventriculos",
         )
 
-    if e_e is not None:
-        if e_e > 14:
-            _agregar_unico(
-                resultado.conclusiones,
-                "Hallazgos compatibles con aumento de las presiones de llenado del ventrículo izquierdo.",
-                PRIORIDADES["otros"],
-                "presiones_llenado",
-            )
-        elif e_e >= 8:
-            _agregar_unico(
-                resultado.hallazgos,
-                "E/e' en rango intermedio; interpretar en conjunto con el resto de los parámetros de función diastólica.",
-                PRIORIDADES["otros"],
-                "ee_intermedio",
-            categoria="ventriculos",
-            )
-
     # --------------------------------------------------------
     # VD
     # --------------------------------------------------------
     tapse = _num(valores, "TAPSE", "TAPSE_VD")
     s_prime = _num(valores, "ONDA_S", "ONDA_S_PRIMA", "S_PRIMA")
-    basal_vd = _num(valores, "DIAMETRO_BASAL_VD", "DIAM_BASAL_VD")
-    medio_vd = _num(valores, "DIAMETRO_MEDIO_VD", "DIAM_MEDIO_VD")
+    basal_vd = _num(valores, "DIAMETRO_VD_BASAL", "DIAMETRO_BASAL_VD", "DIAM_BASAL_VD")
+    medio_vd = _num(valores, "DIAMETRO_VD_MEDIO", "DIAMETRO_MEDIO_VD", "DIAM_MEDIO_VD")
 
     vd_partes = []
     if basal_vd is not None:
@@ -1210,6 +1620,32 @@ def construir_informe_automatico(
             "vd",
             categoria="ventriculos",
         )
+
+    vd_dilatado = (basal_vd is not None and basal_vd > VD_BASAL_MAX) or (medio_vd is not None and medio_vd > VD_MEDIO_MAX)
+    if vd_dilatado:
+        partes = []
+        if basal_vd is not None:
+            partes.append(f"diámetro basal {_fmt(basal_vd, 0)} mm")
+        if medio_vd is not None:
+            partes.append(f"diámetro medio {_fmt(medio_vd, 0)} mm")
+        texto_vd = f"Dilatación del ventrículo derecho ({'; '.join(partes)})."
+        _agregar_unico(resultado.hallazgos, texto_vd, PRIORIDADES["funcion_vd"], "dilatacion_vd", categoria="ventriculos")
+        _agregar_unico(resultado.conclusiones, texto_vd, PRIORIDADES["funcion_vd"], "dilatacion_vd")
+
+    # Acoplamiento VD-arteria pulmonar (TAPSE/PSAP)
+    acoplamiento = _num(valores, "ACOPLAMIENTO_VENTRICULO_ARTERIAL_DERECHO", "TAPSE_PSAP")
+    psap_acop = _num(valores, "PSAP")
+    if acoplamiento is None and tapse is not None and psap_acop:
+        acoplamiento = tapse / psap_acop
+    if acoplamiento is not None:
+        if acoplamiento < TAPSE_PSAP_MIN:
+            texto_acop = f"Desacoplamiento ventrículo-arterial derecho (TAPSE/PSAP {_fmt(acoplamiento, 2)} mm/mmHg)."
+            _agregar_unico(resultado.hallazgos, texto_acop, PRIORIDADES["funcion_vd"], "acoplamiento_vd", categoria="ventriculos")
+            _agregar_unico(resultado.conclusiones, texto_acop, PRIORIDADES["funcion_vd"], "acoplamiento_vd")
+        else:
+            _agregar_unico(resultado.hallazgos,
+                           f"Acoplamiento ventrículo-arterial derecho conservado (TAPSE/PSAP {_fmt(acoplamiento, 2)} mm/mmHg).",
+                           PRIORIDADES["funcion_vd"], "acoplamiento_vd", categoria="ventriculos")
 
     vd_resultado = interpretar_tapse(tapse, s_prime)
     if vd_resultado:
@@ -1249,7 +1685,7 @@ def construir_informe_automatico(
             conclusion_ai = texto_ai.replace("Aurícula izquierda ", "Dilatación ")
             # Reescritura más natural.
             conclusion_ai = (
-                f"Dilatación {estado_ai.replace('_', ' ')} de la aurícula izquierda "
+                f"Dilatación {_GRADO_DILATACION_AI.get(estado_ai, '')} de la aurícula izquierda "
                 f"(volumen indexado {_fmt(vol_ai, 0)} mL/m²)."
             )
             _agregar_unico(
@@ -1259,15 +1695,20 @@ def construir_informe_automatico(
                 "ai",
             )
 
-    area_ad = _num(valores, "AREA_AD", "AREA_AURICULA_DERECHA")
+    area_ad = _num(valores, "AREA_AD_4_CAMARAS", "AREA_AD", "AREA_AURICULA_DERECHA")
     if area_ad is not None:
-        _agregar_unico(
-            resultado.hallazgos,
-            f"Área de aurícula derecha de {_fmt(area_ad, 0)} cm².",
-            PRIORIDADES["auriculas"],
-            "ad",
-            categoria="auriculas",
-        )
+        if area_ad > AD_AREA_MAX:
+            texto_ad = f"Dilatación de la aurícula derecha (área {_fmt(area_ad, 0)} cm²)."
+            _agregar_unico(resultado.hallazgos, texto_ad, PRIORIDADES["auriculas"], "ad", categoria="auriculas")
+            _agregar_unico(resultado.conclusiones, texto_ad, PRIORIDADES["auriculas"], "ad")
+        else:
+            _agregar_unico(
+                resultado.hallazgos,
+                f"Área de aurícula derecha de {_fmt(area_ad, 0)} cm².",
+                PRIORIDADES["auriculas"],
+                "ad",
+                categoria="auriculas",
+            )
 
     # --------------------------------------------------------
     # VALVULOPATÍAS (motor único compartido con estudios.py)
@@ -1276,6 +1717,27 @@ def construir_informe_automatico(
     # --------------------------------------------------------
     valvulas = evaluar_valvulopatias(valores, sexo_paciente)
     valv = {r["clave"]: r for r in valvulas}
+
+    # ---- Presión de llenado del VI (ASE 2025) ----
+    motivo_na = None
+    em = valv.get("estenosis_mitral")
+    im = valv.get("insuf_mit")
+    if _protesis_mitral_texto(valores):
+        motivo_na = "prótesis o plastia mitral"
+    elif em and em["estado"] not in ("no_significativa",):
+        motivo_na = "estenosis mitral"
+    elif im and im.get("nivel") is not None and im["nivel"] >= 3:
+        motivo_na = "insuficiencia mitral severa"
+    elif evaluar_constriccion_pericardica(valores):
+        motivo_na = "sospecha de constricción pericárdica"
+    elif "FLUTTER" in _normalizar_codigo(ritmo):
+        motivo_na = "flutter auricular"
+    diast = evaluar_funcion_diastolica(valores, ritmo, motivo_na, _to_float(imc))
+    if diast:
+        _agregar_unico(resultado.hallazgos, diast["texto"], PRIORIDADES["otros"], "presion_llenado",
+                       categoria="ventriculos")
+        if diast.get("conclusion"):
+            _agregar_unico(resultado.conclusiones, diast["conclusion"], PRIORIDADES["otros"], "presiones_llenado")
 
     def _agregar_valvula(clave: str) -> None:
         r = valv.get(clave)
@@ -1300,17 +1762,25 @@ def construir_informe_automatico(
     if pisa_ao is not None:
         _agregar_unico(resultado.hallazgos, f"Radio PISA aórtico de {_fmt(pisa_ao, 1)} mm.",
                        PRIORIDADES["valvula_aortica"], "pisa_ao", categoria="valvula_aortica")
-    if protesis_ao and _normalizar_codigo(protesis_ao) != "AUSENTE":
+    # Solo si el motor de valvulopatías no la describió ya (evita duplicar la línea).
+    if protesis_ao and _normalizar_codigo(protesis_ao) not in ("AUSENTE", "PLASTIA") and not str((valv.get("estenosis_ao") or {}).get("estado", "")).startswith("protesis"):
         _agregar_unico(resultado.hallazgos, f"Prótesis aórtica: {protesis_ao}.",
                        PRIORIDADES["valvula_aortica"], "protesis_ao", categoria="valvula_aortica")
+        _agregar_unico(resultado.conclusiones,
+                       f"Portador de prótesis aórtica ({protesis_ao}); no se registraron parámetros Doppler para evaluar su función.",
+                       PRIORIDADES["valvula_aortica"], "protesis_ao")
 
     # ---- Válvula mitral ----
     protesis_mit = _cat(valores, "PROTESIS_MITRAL")
     _agregar_valvula("estenosis_mitral")
     _agregar_valvula("insuf_mit")
-    if protesis_mit and _normalizar_codigo(protesis_mit) != "AUSENTE":
+    # Solo si el motor de valvulopatías no la describió ya (evita duplicar la línea).
+    if protesis_mit and _normalizar_codigo(protesis_mit) not in ("AUSENTE", "PLASTIA") and not str((valv.get("estenosis_mitral") or {}).get("estado", "")).startswith("protesis"):
         _agregar_unico(resultado.hallazgos, f"Prótesis mitral: {protesis_mit}.",
                        PRIORIDADES["valvula_mitral"], "protesis_mit", categoria="valvula_mitral")
+        _agregar_unico(resultado.conclusiones,
+                       f"Portador de prótesis mitral ({protesis_mit}); no se registraron parámetros Doppler para evaluar su función.",
+                       PRIORIDADES["valvula_mitral"], "protesis_mit")
 
     # ---- Válvula tricúspide / presión pulmonar ----
     vmax_it = _num(valores, "VELOCIDAD_MAXIMA_IT", "VEL_MAX_IT", "VMAX_IT")
@@ -1386,6 +1856,15 @@ def construir_informe_automatico(
     if partes:
         _agregar_unico(resultado.hallazgos, "Arteria pulmonar: " + "; ".join(partes) + ".",
                        PRIORIDADES["presion_pulmonar"], "pulmonar", categoria="valvula_pulmonar")
+    if tap is not None and tap < TAP_HTP:
+        _agregar_unico(resultado.hallazgos,
+                       f"Tiempo de aceleración pulmonar acortado ({_fmt(tap, 0)} ms), sugerente de hipertensión pulmonar.",
+                       PRIORIDADES["presion_pulmonar"], "tap_corto", categoria="valvula_pulmonar")
+    if rvp is not None and rvp >= RVP_ELEVADA:
+        grado_rvp = "severamente elevada" if rvp > RVP_SEVERA else "elevada"
+        _agregar_unico(resultado.conclusiones,
+                       f"Resistencia vascular pulmonar estimada {grado_rvp} ({_fmt(rvp, 1)} UW).",
+                       PRIORIDADES["presion_pulmonar"], "rvp")
 
     global_valv = conclusion_global_valvular(valvulas)
     if global_valv:
@@ -1428,7 +1907,7 @@ def construir_informe_automatico(
     # PERICARDIO
     # --------------------------------------------------------
     derrame = _num(valores, "MAGNITUD_DERRAME_PERICARDICO", "MAGNITUD_DERRAME")
-    pericardio = _cat(valores, "PERICARDIO", "DESCRIPCION_PERICARDIO")
+    pericardio = _cat(valores, "GRADO_DERRAME_PERICARDICO", "PERICARDIO", "DESCRIPCION_PERICARDIO")
     tap_input = _cat(valores, "TAPONAMIENTO", "TAPONAMIENTO_CARDIACO")
 
     if derrame is not None:
@@ -1461,7 +1940,7 @@ def construir_informe_automatico(
                 f"derrame_{grado}",
             )
 
-    if pericardio:
+    if pericardio and derrame is None:
         _agregar_unico(
             resultado.hallazgos,
             f"Pericardio: {pericardio}.",
@@ -1493,21 +1972,68 @@ def construir_informe_automatico(
     # --------------------------------------------------------
     # VOLUMEN SISTÓLICO
     # --------------------------------------------------------
+    # Decisión clínica: se informan ambos métodos con su nombre.
+    #  · Volumétrico (VFD − VFS, Simpson): volumen latido TOTAL del VI.
+    #  · Doppler (área TSVI × VTI TSVI): volumen latido ANTERÓGRADO.
+    # La clasificación de flujo (bajo flujo <35 mL/m²) usa el Doppler
+    # (ASE/EACVI 2017, estenosis aórtica). Con IM/IA significativa el total
+    # supera al anterógrado; esa diferencia es esperable, no un error.
     vs = _num(valores, "VOLUMEN_LATIDO", "VS")
     vs_i = _num(valores, "VOLUMEN_LATIDO_INDEXADO", "VS_INDEX")
-    if vs is not None or vs_i is not None:
-        partes = []
+    vfd = _num(valores, "VOLUMEN_FIN_DIASTOLE_VI", "VFD_VI")
+    vfs = _num(valores, "VOLUMEN_FIN_SISTOLE_VI", "VFS_VI")
+    d_tsvi = _num(valores, "DIAMETRO_TSVI")
+    vti_tsvi = _num(valores, "VTI_TSVI")
+    area_tsvi = _num(valores, "AREA_TSVI")
+    asc_num = _to_float(asc)
+    if asc_num is not None and asc_num <= 0:
+        asc_num = None
+
+    vs_vol = vfd - vfs if vfd is not None and vfs is not None and vfd > vfs else None
+    if area_tsvi is None and d_tsvi:
+        area_tsvi = math.pi * (d_tsvi / 20.0) ** 2  # mm → cm de radio
+    vs_dop = area_tsvi * vti_tsvi if area_tsvi and vti_tsvi else None
+
+    partes = []
+    if vs_vol is not None:
+        t = f"volumétrico (VFD − VFS) {_fmt(vs_vol, 0)} mL"
+        if asc_num:
+            t += f" ({_fmt(vs_vol / asc_num, 0)} mL/m²)"
+        partes.append(t)
+    if vs_dop is not None:
+        t = f"Doppler (TSVI × VTI) {_fmt(vs_dop, 0)} mL"
+        if asc_num:
+            t += f" ({_fmt(vs_dop / asc_num, 0)} mL/m²)"
+        partes.append(t)
+    if not partes and (vs is not None or vs_i is not None):
         if vs is not None:
-            partes.append(f"volumen latido de {_fmt(vs, 0)} mL")
+            partes.append(f"{_fmt(vs, 0)} mL")
         if vs_i is not None:
-            partes.append(f"volumen latido indexado de {_fmt(vs_i, 0)} mL/m²")
-        _agregar_unico(
-            resultado.hallazgos,
-            "Volúmenes ventriculares: " + "; ".join(partes) + ".",
-            PRIORIDADES["otros"],
-            "volumen_latido",
-            categoria="ventriculos",
-        )
+            partes.append(f"indexado {_fmt(vs_i, 0)} mL/m²")
+    if partes:
+        texto_vs = "Volumen latido: " + "; ".join(partes) + "."
+        if vs_vol is not None and vs_dop is not None:
+            dif = vs_vol - vs_dop
+            if abs(dif) >= 15 and abs(dif) / max(vs_vol, vs_dop) >= 0.20:
+                regurg = [k for k in ("insuf_mit", "insuf_ao")
+                          if valv.get(k) and (valv[k].get("nivel") or 0) >= 2]
+                if dif > 0 and regurg:
+                    texto_vs += (" El volumen total supera al anterógrado, diferencia concordante con el "
+                                 "volumen regurgitante de la valvulopatía; el flujo se clasifica con el valor Doppler.")
+                elif dif > 0:
+                    texto_vs += (" Volumen volumétrico mayor que el Doppler sin regurgitación significativa: "
+                                 "revisar la medición del TSVI (un error de 1 mm cambia el área ~10 %).")
+                else:
+                    texto_vs += (" Volumen Doppler mayor que el volumétrico: el 2D suele subestimar los volúmenes "
+                                 "del VI; se prioriza el valor Doppler para el flujo.")
+        _agregar_unico(resultado.hallazgos, texto_vs, PRIORIDADES["otros"], "volumen_latido",
+                       categoria="ventriculos")
+        vs_dop_i = vs_dop / asc_num if vs_dop is not None and asc_num else None
+        ea = valv.get("estenosis_ao")
+        if vs_dop_i is not None and vs_dop_i < 35 and not (ea and ea["estado"] != "no_significativa"):
+            _agregar_unico(resultado.conclusiones,
+                           f"Volumen latido anterógrado indexado bajo ({_fmt(vs_dop_i, 0)} mL/m²; bajo flujo <35 mL/m²).",
+                           PRIORIDADES["otros"], "bajo_flujo")
 
     # --------------------------------------------------------
     # ALERTAS
@@ -1530,8 +2056,10 @@ def construir_informe_automatico(
     # --------------------------------------------------------
     # ORDEN FINAL
     # --------------------------------------------------------
-    resultado.hallazgos.sort(key=lambda h: (h.prioridad, h.texto))
-    resultado.conclusiones.sort(key=lambda h: (h.prioridad, h.texto))
+    # Orden estable: por prioridad y, dentro de la misma prioridad, en el
+    # orden en que se redactaron (descripción antes que interpretación).
+    resultado.hallazgos.sort(key=lambda h: h.prioridad)
+    resultado.conclusiones.sort(key=lambda h: h.prioridad)
 
     return resultado
 
@@ -1552,6 +2080,19 @@ def informe_a_texto(resultado: ResultadoInterpretacion) -> Tuple[str, str]:
     )
 
     return hallazgos, conclusiones
+
+
+def informe_a_texto_agrupado(resultado: ResultadoInterpretacion) -> Tuple[str, str]:
+    """
+    Igual que informe_a_texto(), pero con los hallazgos agrupados por
+    sección (Aorta, Aurículas, Ventrículos, válvulas, pericardio), como en
+    el PDF. Lo usa la pestaña "Informe Clínico" de pages/estudios.py.
+    """
+    bloques = []
+    for titulo, textos in agrupar_hallazgos_por_categoria(resultado):
+        bloques.append(titulo.upper() + "\n" + "\n".join(textos))
+    _, conclusiones = informe_a_texto(resultado)
+    return "\n\n".join(bloques), conclusiones
 
 
 def agrupar_hallazgos_por_categoria(
@@ -1577,7 +2118,7 @@ def agrupar_hallazgos_por_categoria(
         hallazgos_categoria = por_categoria.get(clave_categoria)
         if not hallazgos_categoria:
             continue
-        hallazgos_categoria = sorted(hallazgos_categoria, key=lambda h: (h.prioridad, h.texto))
+        hallazgos_categoria = sorted(hallazgos_categoria, key=lambda h: h.prioridad)
         secciones.append((titulo, [h.texto for h in hallazgos_categoria]))
 
     return secciones
@@ -1876,6 +2417,16 @@ def _obtener_dato_paciente(obj: Any, *attrs: str, default: Any = "—") -> Any:
     valor = _get_attr(obj, *attrs, default=None)
     return default if valor is None or str(valor).strip() == "" else valor
 
+def _asc_estudio(estudio: Any, paciente: Any) -> Optional[float]:
+    """ASC del estudio; si no está guardada, se calcula (Mosteller) con peso/talla."""
+    sc = _to_float(_get_attr(estudio, "asc_valor", default=None))
+    if sc:
+        return sc
+    talla = _get_attr(estudio, "talla", default=None) or _get_attr(paciente, "talla", "talla_cm", default=None)
+    peso = _get_attr(estudio, "peso", default=None) or _get_attr(paciente, "peso", "peso_kg", default=None)
+    return _calcular_sc(talla, peso)
+
+
 def _calcular_sc(talla_cm: Any, peso_kg: Any) -> Optional[float]:
     talla = _to_float(talla_cm)
     peso = _to_float(peso_kg)
@@ -2012,6 +2563,22 @@ def _safe_patient_name(paciente: Any) -> str:
     return " ".join(str(x).strip() for x in (nombres, ap, am) if str(x).strip())
 
 
+def _edad_en_fecha(fecha_nacimiento: Any, fecha_ref: Any) -> Any:
+    """Edad en años cumplidos a fecha_ref (o hoy). '—' si no se puede calcular."""
+    from datetime import date, datetime
+    def _a_fecha(x):
+        if isinstance(x, datetime):
+            return x.date()
+        if isinstance(x, date):
+            return x
+        return None
+    nac = _a_fecha(fecha_nacimiento)
+    if nac is None:
+        return "—"
+    ref = _a_fecha(fecha_ref) or date.today()
+    return ref.year - nac.year - ((ref.month, ref.day) < (nac.month, nac.day))
+
+
 def generar_pdf_desde_historial(
     estudio: Any,
     paciente: Any,
@@ -2037,7 +2604,14 @@ def generar_pdf_desde_historial(
     registros = _filtrar_registros_para_informe(registros)
     sexo = _get_attr(paciente, "sexo", default=None)
 
-    resultado = construir_informe_automatico(valores, sexo)
+    resultado = construir_informe_automatico(
+        valores,
+        sexo,
+        ritmo=_get_attr(estudio, "ritmo", default=None),
+        fc=_get_attr(estudio, "fcia", default=None),
+        asc=_asc_estudio(estudio, paciente),
+        imc=_get_attr(estudio, "imc_valor", "imc", default=None),
+    )
     _, conclusiones_texto = informe_a_texto(resultado)
     secciones_hallazgos = agrupar_hallazgos_por_categoria(resultado)
 
@@ -2119,10 +2693,19 @@ def generar_pdf_desde_historial(
 
     nombre = _safe_patient_name(paciente)
     rut = _obtener_dato_paciente(paciente, "rut", "RUT")
-    talla = _obtener_dato_paciente(paciente, "talla", "talla_cm", "altura")
-    peso = _obtener_dato_paciente(paciente, "peso", "peso_kg")
-    sc = _obtener_dato_paciente(paciente, "sc", "superficie_corporal", default=None)
-    if sc is None or str(sc).strip() == "":
+    # Peso, talla y ASC se guardan en el ESTUDIO (cambian entre exámenes);
+    # el paciente queda solo como respaldo.
+    talla = _obtener_dato_paciente(estudio, "talla", default=None)
+    if talla in (None, "—"):
+        talla = _obtener_dato_paciente(paciente, "talla", "talla_cm", "altura")
+    peso = _obtener_dato_paciente(estudio, "peso", default=None)
+    if peso in (None, "—"):
+        peso = _obtener_dato_paciente(paciente, "peso", "peso_kg")
+    # La ASC que calculó la app al registrar el estudio (misma cifra que en pantalla).
+    sc = _obtener_dato_paciente(estudio, "asc_valor", default=None)
+    if sc in (None, "—"):
+        sc = _obtener_dato_paciente(paciente, "sc", "superficie_corporal", default=None)
+    if sc in (None, "—") or str(sc).strip() == "":
         sc_calc = _calcular_sc(talla, peso)
         sc = f"{sc_calc:.2f}" if sc_calc is not None else "—"
 
@@ -2130,10 +2713,16 @@ def generar_pdf_desde_historial(
         paciente, "fecha_nacimiento", "fecha_nac", "nacimiento"
     )
     edad = _obtener_dato_paciente(paciente, "edad")
+    if edad == "—":
+        # Paciente no guarda la edad: se calcula a la fecha del estudio.
+        edad = _edad_en_fecha(
+            fecha_nacimiento,
+            _get_attr(estudio, "fecha_estudio", "fecha_creacion", default=None),
+        )
     ritmo = _obtener_dato_paciente(estudio, "ritmo", default=None)
     if ritmo in (None, "—"):
         ritmo = _obtener_dato_paciente(paciente, "ritmo")
-    fc = _obtener_dato_paciente(estudio, "fc", "frecuencia_cardiaca", default=None)
+    fc = _obtener_dato_paciente(estudio, "fcia", "fc", "frecuencia_cardiaca", default=None)
     if fc in (None, "—"):
         fc = _obtener_dato_paciente(paciente, "fc", "frecuencia_cardiaca")
 

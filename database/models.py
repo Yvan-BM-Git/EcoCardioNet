@@ -13,7 +13,7 @@ from sqlalchemy import (
 )
 
 from datetime import datetime
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, deferred, relationship
 
 Base = declarative_base()
 
@@ -83,7 +83,9 @@ class Estudio(Base):
     fcia = Column(Integer, nullable=True)
 
 # --- NUEVO: INFORME PDF IMPORTADO ---
-    pdf_original = Column(LargeBinary, nullable=True)
+    # deferred: el binario NO se descarga en cada consulta de estudios; solo
+    # se lee cuando el código accede a estudio.pdf_original.
+    pdf_original = deferred(Column(LargeBinary, nullable=True))
     pdf_nombre_archivo = Column(String, nullable=True)
 
     mediciones = relationship("Medicion", back_populates="estudio")
@@ -105,7 +107,11 @@ class Variable(Base):
     derivada_de = Column(String)
     obligatoria = Column(String)
     grupo_analitico = Column(String)
-    orden = Column(Integer, nullable=True) 
+    orden = Column(Integer, nullable=True)
+    # Límites de plausibilidad (columnas ValorMinimo / ValorMaximo del Excel).
+    # Fuera de rango la app ADVIERTE, no bloquea. Vacíos = sin límite.
+    valor_minimo = Column(Float, nullable=True)
+    valor_maximo = Column(Float, nullable=True)
 
 
 class Medicion(Base):

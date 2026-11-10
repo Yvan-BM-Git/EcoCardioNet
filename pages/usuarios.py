@@ -10,8 +10,10 @@ st.set_page_config(page_title="Gestión de Usuarios", page_icon="👥", layout="
 
 from menu import generar_menu
 from werkzeug.security import generate_password_hash
-from database.database import SessionLocal
+from database.database import SessionLocal, asegurar_bd
 from database.models import Usuario, Rol
+
+asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 
 # 1. Dibujar el menú dinámico
 generar_menu()

@@ -22,8 +22,10 @@ if not st.session_state.get("autenticado", False):
     
 import pandas as pd
 from datetime import date
-from database.database import SessionLocal
+from database.database import SessionLocal, asegurar_bd
 from database.models import Paciente
+
+asegurar_bd()  # crea tablas/migraciones una vez; si la BD no responde, mensaje claro
 
 from utils.pacientes_utils import (
     OPTS_PREV, OPTS_SEXO, DIC_PREFIJOS, LISTA_PREFIJOS,

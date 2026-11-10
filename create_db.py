@@ -1,21 +1,24 @@
 # create_db.py
+"""
+Inicializa la base de datos: tablas, roles, administrador y catálogo de
+variables (desde variables_ecocardio.xlsx).
+
+Uso:
+    python create_db.py
+
+La contraseña del administrador NO está en el código. Se toma de la
+variable de entorno ECOCARDIONET_ADMIN_PASSWORD o se pide por consola.
+"""
+import os
+import sys
+from getpass import getpass
 from pathlib import Path
 
 import pandas as pd
+from werkzeug.security import generate_password_hash
 
-from database.database import (
-    engine,
-    SessionLocal
-)
-
-from database.models import (
-    Base,
-    Rol,
-    Usuario,
-    Variable
-)
-
-from security import hash_password
+from database.database import SessionLocal, init_db
+from database.models import Rol, Usuario, Variable
 
 # ==================================================
 # CONFIGURACIÓN
@@ -33,47 +36,43 @@ OBLIGATORIOS_VALIDOS = {
     "NO"
 }
 
+# El login formatea el RUT con puntos y guion (12.345.678-9).
+ADMIN_RUT = "11.111.111-1"
+ADMIN_RUT_ANTIGUO = "11111111-1"   # formato usado por versiones anteriores
+LARGO_MINIMO_CLAVE = 8
+
+
+def pedir_clave_admin():
+    clave = os.environ.get("ECOCARDIONET_ADMIN_PASSWORD")
+    if clave:
+        if len(clave) < LARGO_MINIMO_CLAVE:
+            sys.exit(f"ECOCARDIONET_ADMIN_PASSWORD debe tener al menos {LARGO_MINIMO_CLAVE} caracteres.")
+        return clave
+    while True:
+        clave = getpass(f"Contraseña para el administrador ({ADMIN_RUT}): ")
+        if len(clave) < LARGO_MINIMO_CLAVE:
+            print(f"  La contraseña debe tener al menos {LARGO_MINIMO_CLAVE} caracteres.")
+            continue
+        if getpass("Repita la contraseña: ") != clave:
+            print("  Las contraseñas no coinciden.")
+            continue
+        return clave
+
+
+def es_hash_antiguo(password_hash):
+    """Hash de security.py (salt$sha256): incompatible con el login (werkzeug)."""
+    return bool(password_hash) and password_hash.count("$") == 1
+
+
 # ==================================================
-# CREAR TABLAS
+# CREAR TABLAS, MIGRAR COLUMNAS Y ROLES
 # ==================================================
 
-Base.metadata.create_all(bind=engine)
+print("\nCreando tablas y roles...")
+init_db()
+print("✓ Tablas y roles listos")
 
 session = SessionLocal()
-
-# ==================================================
-# ROLES
-# ==================================================
-
-print("\nCreando roles...")
-
-roles = [
-    "Administrador",
-    "Cardiólogo",
-    "Investigador"
-]
-
-for nombre in roles:
-
-    existe = (
-        session.query(Rol)
-        .filter(
-            Rol.nombre == nombre
-        )
-        .first()
-    )
-
-    if not existe:
-
-        session.add(
-            Rol(
-                nombre=nombre
-            )
-        )
-
-session.commit()
-
-print("✓ Roles creados")
 
 # ==================================================
 # ADMINISTRADOR
@@ -83,40 +82,35 @@ print("\nVerificando administrador...")
 
 admin = (
     session.query(Usuario)
-    .filter(
-        Usuario.rut == "11111111-1"
-    )
+    .filter(Usuario.rut.in_([ADMIN_RUT, ADMIN_RUT_ANTIGUO]))
     .first()
 )
 
 if not admin:
-
-    rol_admin = (
-        session.query(Rol)
-        .filter(
-            Rol.nombre == "Administrador"
-        )
-        .first()
-    )
-
-    nuevo_admin = Usuario(
-        rut="11111111-1",
-        nombre="Administrador",
-        email="admin@ecocardionet.cl",
-        password_hash=hash_password("admin123"),
-        rol_id=rol_admin.id
-    )
-
+    rol_admin = session.query(Rol).filter(Rol.nombre == "Administrador").first()
     session.add(
-        nuevo_admin
+        Usuario(
+            rut=ADMIN_RUT,
+            nombre="Administrador",
+            email="admin@ecocardionet.cl",
+            password_hash=generate_password_hash(pedir_clave_admin()),
+            rol_id=rol_admin.id,
+        )
     )
-
     session.commit()
+    print(f"✓ Administrador creado (RUT {ADMIN_RUT})")
 
-    print("✓ Administrador creado")
+elif es_hash_antiguo(admin.password_hash) or admin.rut == ADMIN_RUT_ANTIGUO:
+    # El administrador creado por versiones anteriores no podía iniciar
+    # sesión: hash incompatible y RUT sin puntos.
+    print("! El administrador existente usa un formato antiguo; se actualizará.")
+    admin.rut = ADMIN_RUT
+    if es_hash_antiguo(admin.password_hash):
+        admin.password_hash = generate_password_hash(pedir_clave_admin())
+    session.commit()
+    print(f"✓ Administrador actualizado (RUT {ADMIN_RUT})")
 
 else:
-
     print("✓ Administrador ya existe")
 
 # ==================================================
@@ -202,6 +196,21 @@ Códigos duplicados encontrados:
 {duplicados['Codigo'].tolist()}
 """
     )
+
+def leer_limite(row, columna, codigo):
+    """Lee ValorMinimo/ValorMaximo; acepta coma o punto decimal."""
+    if columna not in row.index or pd.isna(row[columna]):
+        return None
+    texto = str(row[columna]).strip().replace(",", ".")
+    if texto == "":
+        return None
+    try:
+        return float(texto)
+    except ValueError:
+        raise Exception(
+            f"{columna} no numérico en la variable {codigo}: {row[columna]!r}"
+        )
+
 
 # ==================================================
 # CARGA VARIABLES
@@ -290,6 +299,24 @@ for _, row in df.iterrows():
         else ""
     )
 
+    # Límites de plausibilidad (opcionales; vacíos = sin límite)
+    orden = (
+        int(row["Orden"])
+        if "Orden" in row.index and pd.notna(row["Orden"])
+        else None
+    )
+
+    valor_minimo = leer_limite(row, "ValorMinimo", codigo)
+    valor_maximo = leer_limite(row, "ValorMaximo", codigo)
+    if (
+        valor_minimo is not None
+        and valor_maximo is not None
+        and valor_minimo > valor_maximo
+    ):
+        raise Exception(
+            f"ValorMinimo > ValorMaximo en la variable {codigo}"
+        )
+
     # --------------------------------------
     # VALIDAR TIPO
     # --------------------------------------
@@ -339,6 +366,9 @@ Tipo: {tipo}
         existe.derivada_de = derivada_de
         existe.obligatoria = obligatoria
         existe.grupo_analitico = grupo_analitico
+        existe.orden = orden
+        existe.valor_minimo = valor_minimo
+        existe.valor_maximo = valor_maximo
 
         actualizadas += 1
 
@@ -372,7 +402,10 @@ Tipo: {tipo}
 
         obligatoria=obligatoria,
 
-        grupo_analitico=grupo_analitico
+        grupo_analitico=grupo_analitico,
+        orden=orden,
+        valor_minimo=valor_minimo,
+        valor_maximo=valor_maximo
     )
 
     session.add(
